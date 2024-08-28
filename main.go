@@ -38,13 +38,16 @@ func getWd() string {
 
 func run(ctx context.Context, cam string, w, h, fps int, mask, root string) error {
 	start := time.Now()
+	secsPerSegment := 4
 
 	// References:
+	// - https://ffmpeg.org/ffmpeg-codecs.html
 	// - https://ffmpeg.org/ffmpeg-filters.html
-	// - https://ffmpeg.org/ffmpeg-utils.html
 	// - https://ffmpeg.org/ffmpeg-formats.html
+	// - https://ffmpeg.org/ffmpeg-utils.html
 	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
 	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
+	// - https://trac.ffmpeg.org/wiki/Encode/H.264
 
 	// Do edge detection.
 	// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
@@ -98,12 +101,14 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
+		"-fflags", "nobuffer",
+		"-analyzeduration", "0",
 		"-f", "v4l2",
 		"-video_size", strconv.Itoa(w)+"x"+strconv.Itoa(h),
 		"-framerate", strconv.Itoa(fps),
 		"-i", cam,
 		// Testing:
-		"-t", "00:00:5",
+		"-t", "00:00:10",
 
 		//"-i", mask,
 
@@ -111,27 +116,29 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		"-filter_complex", filter,
 		"-map", "[out]",
 
-		// MP4:
+		// h264
 		"-c:v", "libx264",
-		"-preset", "fast",
-		"-movflags", "+faststart",
-		"foo.mp4",
+		"-x264opts", "keyint="+strconv.Itoa(fps*secsPerSegment)+":min-keyint="+strconv.Itoa(fps*secsPerSegment)+":no-scenecut",
+		"-preset", "slow",
 
-		/*
-			"-c:v", "libx264",
-			"-preset", "fast",
-			"-f", "hls",
-			"-hls_time", "4",
-			"-hls_list_size", "0",
-			"-hls_segment_filename", "segment_%03d.ts",
-			"output_playlist.m3u8",
-		*/
-	)
-	/*
+		// MP4:
+		//	"-movflags", "+faststart",
+		//	"foo.mp4",
+
 		// Sequence of images:
-		"-qscale:v", "2",
-		"output_frames_%04d.jpg",
-	*/
+		//	"-qscale:v", "2",
+		//	"output_frames_%04d.jpg",
+
+		// HLS
+		"-f", "hls",
+		"-hls_time", strconv.Itoa(secsPerSegment),
+		"-hls_list_size", "5",
+		"-strftime", "1",
+		"-hls_allow_cache", "1",
+		"-hls_flags", "independent_segments",
+		"-hls_segment_filename", "%Y-%m-%dT%H-%M-%S.ts",
+		"output_playlist.m3u8",
+	)
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
