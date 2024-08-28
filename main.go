@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
@@ -40,30 +41,59 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 	// - https://ffmpeg.org/ffmpeg-filters.html#blend
 	// - https://ffmpeg.org/ffmpeg-utils.html#toc-Expression-Evaluation
 
-	// Draw text as an overlay.
+	// Do edge detection.
+	// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
+	// Manual edge detection with a threshold:
+	//	edgedetect := "edgedetect,tblend=all_expr='max(abs(A-B)-0.75,0)*4'"
+	edgedetect := "scale=w=iw/2:h=ih/2,hqdn3d,tblend=all_mode=difference,edgedetect"
+	edgedetect += ",signalstats"
+	// Debugging: Draw the YAVG on the image:
+	//	edgedetect += ",drawtext=" +
+	//		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
+	//		"text='%{metadata\\:lavfi.signalstats.YAVG}':" +
+	//		"x=10:" +
+	//		"y=10:" +
+	//		"fontsize=48:" +
+	//		"fontcolor=white:" +
+	//		"box=1:" +
+	//		"boxcolor=black@0.5:"
+	// Select frames where YAVG is high enough. The disadvantage is that the
+	// frame number becomes off.
+	edgedetect += ",metadata=mode=select:key=lavfi.signalstats.YAVG:value=0.1:function=greater"
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer pr.Close()
+	defer pw.Close()
+	edgedetect += ",metadata=print:key=lavfi.signalstats.YAVG"
+	edgedetect += ":file='pipe\\:3':direct=1"
+	// Debugging: Send to a file instead:
+	//	edgedetect += ":file=yavg.log"
+
+	// Draw the current time as an overlay.
 	epoch := strconv.FormatInt(time.Now().Unix(), 10)
-	fontfile := "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf"
-	content := "text='%{pts\\:gmtime\\:" + epoch + "\\:%Y-%m-%d %T}':"
-	aspect := "fontsize=48: fontcolor=white: box=1: boxcolor=black@0.5:"
-	location := "x=(w-text_w-10): y=(h-text_h-10):"
-	drawtext := "drawtext=fontfile=" + fontfile + ":" + content + location + aspect
-
-	// Do edge detection as a manual alternative to "edgedetect,tblend=all_mode=difference".
-	edgedetect := "edgedetect,tblend=all_expr='max(abs(A-B)-0.75,0)*4'"
-
-	// Blend both video streams.
-	blend := "blend=all_expr='if(gte(B, 0.5),B,A)'"
-
-	// Next:
-	// "scale=iw/2:ih/2,"
-	// metadata=mode=print:file='pipe\:4'
+	drawtimestamp := "drawtext=" +
+		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
+		"text='%{pts\\:localtime\\:" + epoch + "\\:%Y-%m-%d %T}':" +
+		"x=(w-text_w-10):" +
+		"y=(h-text_h-10):" +
+		"fontsize=48:" +
+		"fontcolor=white:" +
+		"box=1:" +
+		"boxcolor=black@0.5:"
 
 	// The final filter:
-	filter := "[0:v]" + edgedetect + "[v1]; [0:v][v1]" + blend + "," + drawtext + "[out]"
+	// TODO: figure out why I can't use hqdn3d once, something like "[0:v]hqdn3d[src];".
+	filter := "[0:v]" + edgedetect + ",trim=end=1,nullsink" // "[v1]"
+	// Debugging: Blend both video streams:
+	//	filter += "; [0:v][v1]hqdn3d,blend=all_expr='if(gte(B, 0.5),B,A)'," + drawtimestamp + "[out]"
+	filter += "; [0:v]hqdn3d," + drawtimestamp + "[out]"
 
 	// #nosec G204
 	cmd := exec.CommandContext(ctx, "ffmpeg",
 		"-hide_banner",
+		"-loglevel", "error",
 		"-f", "v4l2",
 		"-video_size", strconv.Itoa(w)+"x"+strconv.Itoa(h),
 		"-framerate", strconv.Itoa(fps),
@@ -101,7 +131,22 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	cmd.ExtraFiles = []*os.File{pw}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	go func() {
+		slog.Info("start")
+		b := bufio.NewScanner(pr)
+		for b.Scan() {
+			fmt.Printf("%s\n", b.Text())
+			//os.Stdout.WriteString(b.Text())
+			//os.Stdout.Flush()
+		}
+		slog.Info("done")
+		//b.Err()
+	}()
+	return cmd.Wait()
 }
 
 func mainImpl() error {
