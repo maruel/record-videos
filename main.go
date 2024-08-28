@@ -22,11 +22,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
+	"golang.org/x/sync/errgroup"
 )
 
 func getWd() string {
@@ -35,11 +37,14 @@ func getWd() string {
 }
 
 func run(ctx context.Context, cam string, w, h, fps int, mask, root string) error {
+	start := time.Now()
+
 	// References:
+	// - https://ffmpeg.org/ffmpeg-filters.html
+	// - https://ffmpeg.org/ffmpeg-utils.html
+	// - https://ffmpeg.org/ffmpeg-formats.html
 	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
 	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
-	// - https://ffmpeg.org/ffmpeg-filters.html#blend
-	// - https://ffmpeg.org/ffmpeg-utils.html#toc-Expression-Evaluation
 
 	// Do edge detection.
 	// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
@@ -65,14 +70,13 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		return err
 	}
 	defer pr.Close()
-	defer pw.Close()
 	edgedetect += ",metadata=print:key=lavfi.signalstats.YAVG"
 	edgedetect += ":file='pipe\\:3':direct=1"
 	// Debugging: Send to a file instead:
 	//	edgedetect += ":file=yavg.log"
 
 	// Draw the current time as an overlay.
-	epoch := strconv.FormatInt(time.Now().Unix(), 10)
+	epoch := strconv.FormatInt(start.Unix(), 10)
 	drawtimestamp := "drawtext=" +
 		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
 		"text='%{pts\\:localtime\\:" + epoch + "\\:%Y-%m-%d %T}':" +
@@ -132,21 +136,59 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.ExtraFiles = []*os.File{pw}
-	if err := cmd.Start(); err != nil {
+	if err = cmd.Start(); err != nil {
+		_ = pw.Close()
 		return err
 	}
-	go func() {
-		slog.Info("start")
+	eg := errgroup.Group{}
+	eg.Go(func() error {
 		b := bufio.NewScanner(pr)
+		// Form:
+		//	frame:0    pts:87991   pts_time:0.087991
+		//	lavfi.signalstats.YAVG=0.213281
+		frame := 0
+		var ptsTime time.Duration
+		yavg := 0.
+		var err2 error
 		for b.Scan() {
-			fmt.Printf("%s\n", b.Text())
-			//os.Stdout.WriteString(b.Text())
-			//os.Stdout.Flush()
+			l := b.Text()
+			// fmt.Printf("%s\n", l)
+			if a, ok := strings.CutPrefix(l, "lavfi.signalstats.YAVG="); ok {
+				if yavg, err2 = strconv.ParseFloat(a, 64); err2 != nil {
+					slog.Error("metadata", "err", err2)
+					return fmt.Errorf("unexpected metadata output: %q", l)
+				}
+				//fmt.Printf("(#% 4d) %-10s %.1f\n", frame, ptsTime.Round(10*time.Millisecond), yavg)
+				//fmt.Printf("%-10s %.1f\n", ptsTime.Round(10*time.Millisecond), yavg)
+				fmt.Printf("%s %.1f\n", start.Add(ptsTime).Format("2006-01-02T15:04:05.00"), yavg)
+				continue
+			}
+			f := strings.Fields(l)
+			if len(f) != 3 || !strings.HasPrefix(f[0], "frame:") || !strings.HasPrefix(f[2], "pts_time:") {
+				slog.Error("metadata", "f", f)
+				return fmt.Errorf("unexpected metadata output: %q", l)
+			}
+			if frame, err2 = strconv.Atoi(f[0][len("frame:"):]); err2 != nil {
+				slog.Error("metadata", "err", err2)
+				return fmt.Errorf("unexpected metadata output: %q", l)
+			}
+			v := 0.
+			if v, err2 = strconv.ParseFloat(f[2][len("pts_time:"):], 64); err2 != nil {
+				slog.Error("metadata", "err", err2)
+				return fmt.Errorf("unexpected metadata output: %q", l)
+			}
+			ptsTime = time.Duration(v * float64(time.Second))
 		}
-		slog.Info("done")
-		//b.Err()
-	}()
-	return cmd.Wait()
+		_ = frame
+		return b.Err()
+	})
+	err = cmd.Wait()
+	// Guarantee the pipe is closed in case of error.
+	_ = pw.Close()
+	if err2 := eg.Wait(); err == nil {
+		err = err2
+	}
+	return err
 }
 
 func mainImpl() error {
