@@ -408,7 +408,10 @@ func filterMotion(ctx context.Context, ch <-chan motionLevel, events chan<- moti
 		select {
 		case <-done:
 			return
-		case l := <-ch:
+		case l, ok := <-ch:
+			if !ok {
+				return
+			}
 			slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "yavg", l.yavg)
 			if l.yavg >= ythreshold {
 				after = time.After(exp - time.Now().Sub(l.t))
@@ -453,37 +456,71 @@ func findTSFiles(root string, start, end time.Time) ([]string, error) {
 	return out, err
 }
 
-func processMotion(root string, secsPerSegment int, ch <-chan motionEvent) error {
-	const lookBack = 5 * time.Second
-	var last time.Time
-	for event := range ch {
-		// TODO: Send event to Home Assistant.
-		slog.Info("motionEvent", "t", event.t.Format("2006-01-02T15:04:05.00"), "start", event.start)
-		if event.start {
-			// Create a simple m3u8 file. Will be populated later.
-			last = event.t
-		}
-		end := event.t.Add(2)
-		// TODO: This doesn't work because the TS files to not exist yet.
-		files, err := findTSFiles(root, last.Add(-lookBack), end)
-		if err != nil {
-			return err
-		}
-		f, err := os.Create(event.t.Format("2006-01-02T15-04-05") + ".m3u8")
-		if err != nil {
-			return err
-		}
-		if err = m3u8Tmpl.Execute(f, files); err != nil {
-			return err
-		}
-		if err = f.Close(); err != nil {
-			return err
-		}
+func generateM3U8(root string, t, start, end time.Time) error {
+	files, err := findTSFiles(root, start, end)
+	if err != nil {
+		return err
 	}
-	return nil
+	f, err := os.Create(t.Format("2006-01-02T15-04-05") + ".m3u8")
+	if err != nil {
+		return err
+	}
+	err = m3u8Tmpl.Execute(f, files)
+	if err2 := f.Close(); err == nil {
+		err = err2
+	}
+	return err
 }
 
-func run(ctx context.Context, cam, style string, w, h, fps int, mask, root string) error {
+func processMotion(root string, ch <-chan motionEvent) error {
+	// libx264 can buffer 30s at a time.
+	const lookBack = 31 * time.Second
+	const reprocess = time.Minute
+	var toProcess [][3]time.Time
+	var last time.Time
+	var after <-chan time.Time
+	for {
+		select {
+		case n := <-after:
+			for len(toProcess) != 0 {
+				if n.After(toProcess[0][2]) {
+					if err := generateM3U8(root, toProcess[0][0], toProcess[0][1], toProcess[0][2]); err != nil {
+						return err
+					}
+					toProcess = toProcess[1:]
+				}
+			}
+		case event, ok := <-ch:
+			if !ok {
+				for len(toProcess) != 0 {
+					if err := generateM3U8(root, toProcess[0][0], toProcess[0][1], toProcess[0][2]); err != nil {
+						return err
+					}
+					toProcess = toProcess[1:]
+				}
+				return nil
+			}
+			// TODO: Send event to Home Assistant.
+
+			slog.Info("motionEvent", "t", event.t.Format("2006-01-02T15:04:05.00"), "start", event.start)
+			if event.start {
+				// Create a simple m3u8 file. Will be populated later.
+				last = event.t
+			}
+			start := last.Add(-lookBack)
+			end := event.t.Add(reprocess)
+			if err := generateM3U8(root, last, start, end); err != nil {
+				return err
+			}
+			if !event.start {
+				toProcess = append(toProcess, [...]time.Time{event.t, start, end})
+				after = time.After(reprocess)
+			}
+		}
+	}
+}
+
+func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, mask, root string) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -492,7 +529,6 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
 	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
 	// - https://trac.ffmpeg.org/wiki/Encode/H.264
-	secsPerSegment := 3
 	size := strconv.Itoa(w) + "x" + strconv.Itoa(h)
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -524,14 +560,14 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 		"-filter_complex", constructFilterGraph(style, size),
 		"-map", "[out]",
 	)
-	if false {
+	if d > 0 {
 		// Limit runtime for local testing.
-		args = append(args, "-t", "00:00:05")
+		// https://ffmpeg.org/ffmpeg-utils.html#time-duration-syntax
+		args = append(args, "-t", fmt.Sprintf("%.1fs", float64(d)/float64(time.Second)))
 	}
 	// Codec (h264):
 	args = append(args,
 		"-c:v", "libx264",
-		"-x264opts", "keyint="+strconv.Itoa(fps*secsPerSegment)+":min-keyint="+strconv.Itoa(fps*secsPerSegment)+":no-scenecut",
 		"-preset", "fast",
 		"-crf", "30",
 	)
@@ -547,7 +583,6 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 	if true {
 		args = append(args,
 			"-f", "hls",
-			"-hls_time", strconv.Itoa(secsPerSegment),
 			"-hls_list_size", "0",
 			"-strftime", "1",
 			"-hls_allow_cache", "1",
@@ -578,7 +613,7 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 			filterMotion(ctx, ch, events)
 			return nil
 		})
-		eg.Go(func() error { return processMotion(root, secsPerSegment, events) })
+		eg.Go(func() error { return processMotion(root, events) })
 		err = cmd.Wait()
 	}
 	_ = pw.Close()
@@ -620,6 +655,7 @@ func mainImpl() error {
 	w := flag.Int("w", 1280, "width")
 	h := flag.Int("h", 720, "height")
 	fps := flag.Int("fps", 15, "frame rate")
+	d := flag.Duration("d", 0, "record for a specified duration (for testing)")
 	style := styleVar("normal")
 	flag.Var(&style, "style", "style to use")
 	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
@@ -691,7 +727,7 @@ func mainImpl() error {
 		}
 		*mask = tmp
 	}
-	err := run(ctx, *cam, style.String(), *w, *h, *fps, *mask, *root)
+	err := run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root)
 	if tmp != "" {
 		if err2 := os.Remove(tmp); err == nil {
 			err = err2
