@@ -110,7 +110,7 @@ const scaleHalf filter = "scale=w=iw/2:h=ih/2"
 
 // motionEdgeDetect does motion detection by calculating the edges on the delta
 // between each images.
-var motionEdgeDetect = chain{"tblend=all_mode=difference", "edgedetect"}
+var motionEdgeDetect = chain{"tblend=all_mode=difference", "edgedetect", "framerate=fps=15:flags=0"}
 
 var motionEdgeDetectManual = chain{"tblend=all_expr='abs(A-B)'", "edgedetect"}
 
@@ -172,20 +172,117 @@ func (f filterGraph) String() string {
 }
 
 // constructFilterGraph constructs the argument for -filter_complex.
-func constructFilterGraph(verbose bool, size string) string {
-	// TODO: figure out why I can't use hqdn3d once, something like
-	// "[0:v]hqdn3d[src];" then use [src] from there on.
-
-	if verbose {
-		// TODO: No idea why YAVG floor becomes 16 instead of 0 here.
-		f := filterGraph{
+func constructFilterGraph(style string, size string) string {
+	// I could use scale2ref instead of manually specifying size for the black
+	// mask buffer but I am guessing this will be significantly slower.
+	var out filterGraph
+	switch style {
+	case "normal":
+		// TODO: Doesn't work.
+		out = filterGraph{
 			{
 				sources: []string{"[0:v]"},
 				chain:   buildChain("hqdn3d", "split=2"),
-				sinks:   []string{"[v0]", "[v1]"},
+				sinks:   []string{"[src1]", "[src2]"},
 			},
 			{
-				sources: []string{"[v0][1:v]"},
+				sources: []string{"[1:v]"},
+				chain:   buildChain("scale=" + size),
+				sinks:   []string{"[mask]"},
+			},
+			{
+				sources: []string{"[src1][mask]"},
+				chain:   buildChain("alphamerge"),
+				sinks:   []string{"[alpha]"},
+			},
+			{
+				chain: buildChain("color=color=black:size=" + size),
+				sinks: []string{"[black]"},
+			},
+			{
+				sources: []string{"[black][alpha]"},
+				chain:   buildChain("overlay"),
+				sinks:   []string{"[masked]"},
+			},
+			{
+				sources: []string{"[masked]"},
+				// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
+				// discardLowYAVGFrames,
+				chain: buildChain(
+					scaleHalf, motionEdgeDetect, "signalstats", printYAVGtoPipe, discard),
+			},
+			{
+				sources: []string{"[src2]"},
+				chain:   buildChain(drawTimestamp),
+				sinks:   []string{"[out]"},
+			},
+		}
+	case "normal_no_mask":
+		out = filterGraph{
+			{
+				sources: []string{"[0:v]"},
+				chain:   buildChain("hqdn3d", "split=2"),
+				sinks:   []string{"[src1]", "[src2]"},
+			},
+			{
+				sources: []string{"[src1]"},
+				// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
+				chain: buildChain(
+					scaleHalf, motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, discard),
+			},
+			{
+				sources: []string{"[src2]"},
+				chain:   buildChain(drawTimestamp),
+				sinks:   []string{"[out]"},
+			},
+		}
+	case "motion_only":
+		out = filterGraph{
+			{
+				sources: []string{"[0:v]"},
+				chain:   buildChain("hqdn3d"),
+				sinks:   []string{"[src]"},
+			},
+			{
+				sources: []string{"[1:v]"},
+				chain:   buildChain("scale=" + size),
+				sinks:   []string{"[mask]"},
+			},
+			{
+				sources: []string{"[src][mask]"},
+				chain:   buildChain("alphamerge"),
+				sinks:   []string{"[alpha]"},
+			},
+			{
+				chain: buildChain("color=color=black:size=" + size),
+				sinks: []string{"[black]"},
+			},
+			{
+				sources: []string{"[black][alpha]"},
+				chain:   buildChain("overlay"),
+				sinks:   []string{"[masked]"},
+			},
+			{
+				sources: []string{"[masked]"},
+				chain:   buildChain(scaleHalf, motionEdgeDetect, "signalstats", printYAVGtoPipe),
+				sinks:   []string{"[out]"},
+			},
+		}
+	case "debug":
+		// TODO: No idea why YAVG floor becomes 16 instead of 0 here.
+		out = filterGraph{
+			{
+				sources: []string{"[0:v]"},
+				chain:   buildChain("hqdn3d", "split=2"),
+				sinks:   []string{"[src1]", "[src2]"},
+			},
+			{
+				sources: []string{"[1:v]"},
+				chain:   buildChain("scale=" + size),
+				sinks:   []string{"[mask]"},
+			},
+			{
+				sources: []string{"[src1][mask]"},
 				chain:   buildChain("alphamerge"),
 				sinks:   []string{"[alpha]"},
 			},
@@ -204,49 +301,72 @@ func constructFilterGraph(verbose bool, size string) string {
 				sinks:   []string{"[motion]"},
 			},
 			{
-				sources: []string{"[v1]", "[motion]"},
-				//chain:   chain{"blend=all_expr='if(gte(B, 0.5),B,A)'", drawTimestamp},
-				chain: chain{"blend=all_mode='lighten'", drawTimestamp},
+				sources: []string{"[src2]", "[motion]"},
+				//chain:   buildChain("blend=all_expr='if(gte(B, 0.5),B,A)'", drawTimestamp),
+				chain: buildChain("blend=all_mode='lighten'", drawTimestamp),
 				sinks: []string{"[out]"},
 			},
 		}
-		return f.String()
+	case "all3":
+		out = filterGraph{
+			{
+				sources: []string{"[0:v]"},
+				chain:   buildChain("hqdn3d", "split=2"),
+				sinks:   []string{"[src1]", "[src2]"},
+			},
+			{
+				sources: []string{"[1:v]"},
+				chain:   buildChain("scale="+size, "split=2"),
+				sinks:   []string{"[mask1]", "[mask2]"},
+			},
+			{
+				sources: []string{"[src1][mask1]"},
+				chain:   buildChain("alphamerge"),
+				sinks:   []string{"[alpha]"},
+			},
+			{
+				chain: buildChain("color=color=black:size=" + size),
+				sinks: []string{"[black]"},
+			},
+			{
+				chain: buildChain("color=color=green:size="+size, scaleHalf),
+				sinks: []string{"[green]"},
+			},
+			{
+				sources: []string{"[black][alpha]"},
+				chain:   buildChain("overlay"),
+				sinks:   []string{"[masked]"},
+			},
+			{
+				sources: []string{"[masked]"},
+				chain:   buildChain(scaleHalf, motionEdgeDetect, "signalstats", printYAVGtoPipe, drawYAVG),
+				sinks:   []string{"[motion]"},
+			},
+			{
+				sources: []string{"[src2]"},
+				chain:   buildChain(drawTimestamp, "pad=iw*2.5:ih"),
+				sinks:   []string{"[out1]"},
+			},
+			{
+				sources: []string{"[out1][mask2]"},
+				chain:   buildChain("overlay=w"),
+				sinks:   []string{"[out2]"},
+			},
+			{
+				sources: []string{"[out2][motion]"},
+				chain:   buildChain("overlay='4*w'"),
+				sinks:   []string{"[out3]"},
+			},
+			{
+				sources: []string{"[out3][green]"},
+				chain:   buildChain("overlay='4*w':h"),
+				sinks:   []string{"[out]"},
+			},
+		}
+	default:
+		panic("unknown style " + style)
 	}
-
-	f := filterGraph{
-		{
-			sources: []string{"[0:v]"},
-			chain:   buildChain("hqdn3d", "split=2"),
-			sinks:   []string{"[v0]", "[v1]"},
-		},
-		{
-			sources: []string{"[v0][1:v]"},
-			chain:   buildChain("alphamerge"),
-			sinks:   []string{"[alpha]"},
-		},
-		{
-			chain: buildChain("color=color=black:size=" + size),
-			sinks: []string{"[black]"},
-		},
-		{
-			sources: []string{"[black][alpha]"},
-			chain:   buildChain("overlay"),
-			sinks:   []string{"[masked]"},
-		},
-		{
-			sources: []string{"[masked]"},
-			// Speed up (? To be confirmed) edge detection by reducing the image by 4x
-			// and reduce noise: scaleHalf, "hqdn3d"
-			chain: buildChain(
-				motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, discard),
-		},
-		{
-			sources: []string{"[v1]"},
-			chain:   chain{drawTimestamp},
-			sinks:   []string{"[out]"},
-		},
-	}
-	return f.String()
+	return out.String()
 }
 
 func run(ctx context.Context, cam string, w, h, fps int, mask, root string) error {
@@ -266,6 +386,11 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 	}
 	defer pr.Close()
 
+	style := "normal"
+	//style = "normal_no_mask"
+	//style = "motion_only"
+	//style = "debug"
+	style = "all3"
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
@@ -279,11 +404,13 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		"-i", cam,
 		"-i", mask,
 
-		"-filter_complex", constructFilterGraph(false, size),
+		"-filter_complex", constructFilterGraph(style, size),
 		"-map", "[out]",
+	}
 
+	if true {
 		// Testing:
-		"-t", "00:00:10",
+		args = append(args, "-t", "00:00:05")
 	}
 
 	// Codec (h264):
@@ -428,14 +555,15 @@ func mainImpl() error {
 		white := color.RGBA{255, 255, 255, 255}
 		for x := 0; x < *w; x++ {
 			for y := 0; y < *h; y++ {
-				img.Set(x, y, white)
+				img.SetRGBA(x, y, white)
 			}
 		}
-		if false {
+		if true {
 			// Testing: use a partial mask.
-			for x := 100; x < *w; x++ {
-				for y := 0; y < *h; y++ {
-					img.Set(x, y, color.RGBA{})
+			black := color.RGBA{}
+			for x := 0; x < *w; x++ {
+				for y := 0; y < *h+(*w-*h)-x; y++ {
+					img.SetRGBA(x, y, black)
 				}
 			}
 		}
