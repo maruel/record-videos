@@ -1,6 +1,6 @@
-# Serves a directory of videos over HTTP
+# Records movements from a camera as videos to disk
 
-Mainly to see video recordings from motion.
+To be used along with https://github.com/maruel/serve-videos.
 
 
 ## Installation
@@ -14,12 +14,16 @@ Then install `record-videos`:
 
 ## Usage
 
+Help with the command line arguments available:
+
+    record-videos -help
+
 
 ### macOS
 
 The command will look like:
 
-    record-videos -camera "FaceTime HD Camera" -w 1280 -h 720 -fps 30
+    record-videos -camera "FaceTime HD Camera" -fps 30
 
 
 ### linux
@@ -28,6 +32,8 @@ The command will look like:
 
     record-videos -camera /dev/video0
 
-Help with the command line arguments available:
 
-    record-videos -help
+### Advanced
+
+- Try `-style motion` or `-style both`.
+- Try `-mask` to only do motion detection on a subset of the frame.

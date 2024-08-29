@@ -17,6 +17,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -24,6 +25,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/lmittmann/tint"
@@ -118,22 +120,16 @@ var motionEdgeDetect = chain{
 	"tpad=stop_mode=clone:stop_duration=1", "setpts=N/FRAME_RATE/TB",
 }
 
-var motionEdgeDetectManual = chain{"tblend=all_expr='abs(A-B)'", "edgedetect"}
-
 // edgeMotionDetect calculate the deltas between the edges. Uses a minimum
 // threshold.
 //
 // Doesn't seem to be a good idea in practice.
 var edgeMotionDetect = chain{"edgedetect", "tblend=all_expr='max(abs(A-B)-0.75,0)*4'"}
 
-// discardLowYAVGFrames discards frames with YAVG value below 0.1.
+// printYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
 //
-// The disadvantage is that the frame number becomes off.
-const discardLowYAVGFrames filter = "metadata=mode=select:key=lavfi.signalstats.YAVG:value=0.1:function=greater"
-
-// printYAVGtoPipe prints YAVG to pipe #3. This is the first pipe specified in
-// exec.Cmd.ExtraFiles.
-const printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:file='pipe\\:3':direct=1"
+// Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
+const printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:function=greater:value=0.1:file='pipe\\:3':direct=1"
 
 // stream is a stream that takes an input, passes it through a chain of filters
 // and sink into the output.
@@ -146,17 +142,7 @@ type stream struct {
 }
 
 func (s *stream) String() string {
-	out := ""
-	for _, src := range s.sources {
-		//out += "[" + src + "]"
-		out += src
-	}
-	out += s.chain.String()
-	for _, dst := range s.sinks {
-		//out += "[" + dst + "]"
-		out += dst
-	}
-	return out
+	return strings.Join(s.sources, "") + s.chain.String() + strings.Join(s.sinks, "")
 }
 
 // filterGraph is a series of stream to pass to ffmpeg.
@@ -212,7 +198,7 @@ func constructFilterGraph(style string, size string) string {
 			},
 			{
 				sources: []string{"[masked]"},
-				chain:   buildChain(motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, "nullsink"),
+				chain:   buildChain(motionEdgeDetect, "signalstats", printYAVGtoPipe, "nullsink"),
 			},
 			{
 				sources: []string{"[src2]"},
@@ -229,7 +215,7 @@ func constructFilterGraph(style string, size string) string {
 			},
 			{
 				sources: []string{"[src1]"},
-				chain:   buildChain(scaleHalf, motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, "nullsink"),
+				chain:   buildChain(scaleHalf, motionEdgeDetect, "signalstats", printYAVGtoPipe, "nullsink"),
 			},
 			{
 				sources: []string{"[src2]"},
@@ -360,7 +346,89 @@ func constructFilterGraph(style string, size string) string {
 	return out.String()
 }
 
-func run(ctx context.Context, cam string, w, h, fps int, mask, root string) error {
+type motion struct {
+	t    time.Time
+	yavg float64
+}
+
+// processMetadata processes metadata from ffmpeg's metadata:print filter.
+//
+// It expects data in the form:
+//
+//	frame:1336 pts:1336    pts_time:53.44
+//	lavfi.signalstats.YAVG=0.213281
+func processMetadata(start time.Time, r io.Reader, ch chan<- motion) error {
+	b := bufio.NewScanner(r)
+	frame := 0
+	var ptsTime time.Duration
+	yavg := 0.
+	var err2 error
+	for b.Scan() {
+		l := b.Text()
+		slog.Debug("metadata", "l", l)
+		if a, ok := strings.CutPrefix(l, "lavfi.signalstats.YAVG="); ok {
+			if yavg, err2 = strconv.ParseFloat(a, 64); err2 != nil {
+				slog.Error("metadata", "err", err2)
+				return fmt.Errorf("unexpected metadata output: %q", l)
+			}
+			ch <- motion{t: start.Add(ptsTime), yavg: yavg}
+			continue
+		}
+		f := strings.Fields(l)
+		if len(f) != 3 || !strings.HasPrefix(f[0], "frame:") || !strings.HasPrefix(f[2], "pts_time:") {
+			slog.Error("metadata", "f", f)
+			return fmt.Errorf("unexpected metadata output: %q", l)
+		}
+		if frame, err2 = strconv.Atoi(f[0][len("frame:"):]); err2 != nil {
+			slog.Error("metadata", "err", err2)
+			return fmt.Errorf("unexpected metadata output: %q", l)
+		}
+		v := 0.
+		if v, err2 = strconv.ParseFloat(f[2][len("pts_time:"):], 64); err2 != nil {
+			slog.Error("metadata", "err", err2)
+			return fmt.Errorf("unexpected metadata output: %q", l)
+		}
+		ptsTime = time.Duration(v * float64(time.Second))
+	}
+	_ = frame
+	return b.Err()
+}
+
+var m3u8Tmpl = template.Must(template.New("").Parse(`#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-ALLOW-CACHE:YES
+#EXT-X-TARGETDURATION:4
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-INDEPENDENT-SEGMENTS
+{{range .}}#EXTINF:4.000000,
+{{.}}
+{{end}}
+`))
+
+func processMotion(root string, ch <-chan motion) error {
+	// Determine if motion occurred.
+	for event := range ch {
+		slog.Info("motion", "t", event.t.Format("2006-01-02T15:04:05.00"), "yavg", event.yavg)
+		// Look at the files written and creates a loop with the recent files.
+		files := make([]string, 4)
+		for i := 0; i < 4; i++ {
+			files[i] = event.t.Format("2006-01-02T15-04-05") + ".ts"
+		}
+		f, err := os.Create(event.t.Format("2006-01-02T15-04-05") + ".m3u8")
+		if err != nil {
+			return err
+		}
+		if err = m3u8Tmpl.Execute(f, files); err != nil {
+			return err
+		}
+		if err = f.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func run(ctx context.Context, cam, style string, w, h, fps int, mask, root string) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -376,11 +444,6 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		return err
 	}
 	defer pr.Close()
-
-	style := "normal"
-	//style = "normal_no_mask"
-	style = "both"
-	//style = "motion_only"
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
@@ -388,7 +451,6 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		"-fflags", "nobuffer",
 		"-analyzeduration", "0",
 	}
-
 	switch runtime.GOOS {
 	case "darwin":
 		args = append(args, "-f", "avfoundation")
@@ -402,21 +464,19 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		"-framerate", strconv.Itoa(fps),
 		"-i", cam,
 		"-i", mask,
-
 		"-filter_complex", constructFilterGraph(style, size),
 		"-map", "[out]",
 	)
-
-	if true {
-		// Testing:
+	if false {
+		// Limit runtime for local testing.
 		args = append(args, "-t", "00:00:05")
 	}
-
 	// Codec (h264):
 	args = append(args,
 		"-c:v", "libx264",
 		"-x264opts", "keyint="+strconv.Itoa(fps*secsPerSegment)+":min-keyint="+strconv.Itoa(fps*secsPerSegment)+":no-scenecut",
 		"-preset", "fast",
+		"-crf", "30",
 	)
 	// Sequence of images (don't forget to disable h264)
 	if false {
@@ -436,71 +496,52 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 			"-hls_allow_cache", "1",
 			"-hls_flags", "independent_segments",
 			"-hls_segment_filename", "%Y-%m-%dT%H-%M-%S.ts",
-			"output_playlist.m3u8",
+			"all.m3u8",
 		)
 	}
 
+	ch := make(chan motion, 10)
+	eg, ctx := errgroup.WithContext(ctx)
 	slog.Debug("running", "cmd", args)
-	start := time.Now()
 	// #nosec G204
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.ExtraFiles = []*os.File{pw}
-	if err = cmd.Start(); err != nil {
-		_ = pw.Close()
-		return err
+	start := time.Now()
+	if err = cmd.Start(); err == nil {
+		eg.Go(func() error {
+			defer close(ch)
+			return processMetadata(start, pr, ch)
+		})
+		eg.Go(func() error { return processMotion(root, ch) })
+		err = cmd.Wait()
 	}
-	eg := errgroup.Group{}
-	eg.Go(func() error {
-		b := bufio.NewScanner(pr)
-		// Form:
-		//	frame:0    pts:87991   pts_time:0.087991
-		//	lavfi.signalstats.YAVG=0.213281
-		frame := 0
-		var ptsTime time.Duration
-		yavg := 0.
-		var err2 error
-		for b.Scan() {
-			l := b.Text()
-			slog.Debug("metadata", "l", l)
-			if a, ok := strings.CutPrefix(l, "lavfi.signalstats.YAVG="); ok {
-				if yavg, err2 = strconv.ParseFloat(a, 64); err2 != nil {
-					slog.Error("metadata", "err", err2)
-					return fmt.Errorf("unexpected metadata output: %q", l)
-				}
-				//fmt.Printf("(#% 4d) %-10s %.1f\n", frame, ptsTime.Round(10*time.Millisecond), yavg)
-				//fmt.Printf("%-10s %.1f\n", ptsTime.Round(10*time.Millisecond), yavg)
-				fmt.Printf("%s %.1f\n", start.Add(ptsTime).Format("2006-01-02T15:04:05.00"), yavg)
-				continue
-			}
-			f := strings.Fields(l)
-			if len(f) != 3 || !strings.HasPrefix(f[0], "frame:") || !strings.HasPrefix(f[2], "pts_time:") {
-				slog.Error("metadata", "f", f)
-				return fmt.Errorf("unexpected metadata output: %q", l)
-			}
-			if frame, err2 = strconv.Atoi(f[0][len("frame:"):]); err2 != nil {
-				slog.Error("metadata", "err", err2)
-				return fmt.Errorf("unexpected metadata output: %q", l)
-			}
-			v := 0.
-			if v, err2 = strconv.ParseFloat(f[2][len("pts_time:"):], 64); err2 != nil {
-				slog.Error("metadata", "err", err2)
-				return fmt.Errorf("unexpected metadata output: %q", l)
-			}
-			ptsTime = time.Duration(v * float64(time.Second))
-		}
-		_ = frame
-		return b.Err()
-	})
-	err = cmd.Wait()
-	// Guarantee the pipe is closed in case of error.
 	_ = pw.Close()
 	if err2 := eg.Wait(); err == nil {
 		err = err2
 	}
+	if ctx.Err() == context.Canceled {
+		return nil
+	}
 	return err
+}
+
+type styleVar string
+
+func (s *styleVar) Set(v string) error {
+	switch v {
+	case "normal", "normal_no_mask", "both", "motion_only":
+		*s = styleVar(v)
+		return nil
+	default:
+		return errors.New("invalid style. Supported values are: normal, normal_no_mask, both, motion_only")
+	}
+}
+
+func (s *styleVar) String() string {
+	return string(*s)
 }
 
 func mainImpl() error {
@@ -513,12 +554,14 @@ func mainImpl() error {
 	}))
 	slog.SetDefault(logger)
 	cam := flag.String("camera", "", "camera to use")
-	w := flag.Int("w", 640, "width")
-	h := flag.Int("h", 480, "height")
+	w := flag.Int("w", 1280, "width")
+	h := flag.Int("h", 768, "height")
 	fps := flag.Int("fps", 15, "frame rate")
-	mask := flag.String("mask", "", "mask to use")
-	root := flag.String("root", getWd(), "root directory")
-	verbose := flag.Bool("v", false, "verbose")
+	style := styleVar("normal")
+	flag.Var(&style, "style", "style to use")
+	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
+	root := flag.String("root", getWd(), "root directory to store videos into")
+	verbose := flag.Bool("v", false, "enable verbosity")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
@@ -566,7 +609,7 @@ func mainImpl() error {
 				img.SetRGBA(x, y, white)
 			}
 		}
-		if true {
+		if false {
 			// Testing: use a partial mask.
 			black := color.RGBA{}
 			for x := 0; x < *w; x++ {
@@ -575,7 +618,6 @@ func mainImpl() error {
 				}
 			}
 		}
-
 		if err = png.Encode(f, img); err != nil {
 			_ = os.Remove(tmp)
 			return err
@@ -586,7 +628,7 @@ func mainImpl() error {
 		}
 		*mask = tmp
 	}
-	err := run(ctx, *cam, *w, *h, *fps, *mask, *root)
+	err := run(ctx, *cam, style.String(), *w, *h, *fps, *mask, *root)
 	if tmp != "" {
 		if err2 := os.Remove(tmp); err == nil {
 			err = err2
