@@ -172,7 +172,7 @@ func (f filterGraph) String() string {
 }
 
 // constructFilterGraph constructs the argument for -filter_complex.
-func constructFilterGraph(verbose bool) string {
+func constructFilterGraph(verbose bool, size string) string {
 	// TODO: figure out why I can't use hqdn3d once, something like
 	// "[0:v]hqdn3d[src];" then use [src] from there on.
 
@@ -181,16 +181,30 @@ func constructFilterGraph(verbose bool) string {
 		f := filterGraph{
 			{
 				sources: []string{"[0:v]"},
-				chain:   buildChain("hqdn3d", motionEdgeDetect, "signalstats", printYAVGtoPipe),
-				sinks:   []string{"[v1]"},
+				chain:   buildChain("hqdn3d", "split=2"),
+				sinks:   []string{"[v0]", "[v1]"},
 			},
 			{
-				sources: []string{"[v1]"},
-				chain:   buildChain(drawYAVG, "format=yuv420p"),
-				sinks:   []string{"[v2]"},
+				sources: []string{"[v0][1:v]"},
+				chain:   buildChain("alphamerge"),
+				sinks:   []string{"[alpha]"},
 			},
 			{
-				sources: []string{"[0:v]", "[v2]"},
+				chain: buildChain("color=color=black:size=" + size),
+				sinks: []string{"[black]"},
+			},
+			{
+				sources: []string{"[black][alpha]"},
+				chain:   buildChain("overlay"),
+				sinks:   []string{"[masked]"},
+			},
+			{
+				sources: []string{"[masked]"},
+				chain:   buildChain(motionEdgeDetect, "signalstats", printYAVGtoPipe, drawYAVG, "format=yuv420p"),
+				sinks:   []string{"[motion]"},
+			},
+			{
+				sources: []string{"[v1]", "[motion]"},
 				//chain:   chain{"blend=all_expr='if(gte(B, 0.5),B,A)'", drawTimestamp},
 				chain: chain{"blend=all_mode='lighten'", drawTimestamp},
 				sinks: []string{"[out]"},
@@ -198,19 +212,37 @@ func constructFilterGraph(verbose bool) string {
 		}
 		return f.String()
 	}
-	// alphamerge,overlay,
 
 	f := filterGraph{
 		{
 			sources: []string{"[0:v]"},
-			// Speed up (? To be confirmed) edge detection by reducing the image by 4x
-			// and reduce noise.
-			chain: buildChain(
-				scaleHalf, "hqdn3d", motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, discard),
+			chain:   buildChain("hqdn3d", "split=2"),
+			sinks:   []string{"[v0]", "[v1]"},
 		},
 		{
-			sources: []string{"[0:v]"},
-			chain:   chain{"hqdn3d", drawTimestamp},
+			sources: []string{"[v0][1:v]"},
+			chain:   buildChain("alphamerge"),
+			sinks:   []string{"[alpha]"},
+		},
+		{
+			chain: buildChain("color=color=black:size=" + size),
+			sinks: []string{"[black]"},
+		},
+		{
+			sources: []string{"[black][alpha]"},
+			chain:   buildChain("overlay"),
+			sinks:   []string{"[masked]"},
+		},
+		{
+			sources: []string{"[masked]"},
+			// Speed up (? To be confirmed) edge detection by reducing the image by 4x
+			// and reduce noise: scaleHalf, "hqdn3d"
+			chain: buildChain(
+				motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, discard),
+		},
+		{
+			sources: []string{"[v1]"},
+			chain:   chain{drawTimestamp},
 			sinks:   []string{"[out]"},
 		},
 	}
@@ -240,17 +272,18 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		"-loglevel", "error",
 		"-fflags", "nobuffer",
 		"-analyzeduration", "0",
+
 		"-f", "v4l2",
 		"-video_size", size,
 		"-framerate", strconv.Itoa(fps),
-		// Testing:
-		"-t", "00:00:05",
 		"-i", cam,
-		//"-i", mask,
-		//"-f", "lavfi",
-		//"-i", "color=c=black:s="+size,
-		"-filter_complex", constructFilterGraph(true),
+		"-i", mask,
+
+		"-filter_complex", constructFilterGraph(false, size),
 		"-map", "[out]",
+
+		// Testing:
+		"-t", "00:00:10",
 	}
 
 	// Codec (h264):
@@ -381,28 +414,32 @@ func mainImpl() error {
 	}
 	tmp := ""
 	if *mask == "" {
+		// TODO:
+		if false {
+			*mask = "color=color=white:size=" + strconv.Itoa(*w) + "x" + strconv.Itoa(*h)
+		}
 		f, err := os.CreateTemp("", "record-video-mask*.png")
 		if err != nil {
 			return err
 		}
-		// TODO:
-		// *mask = "color=c=white:s=640x400"
 		tmp = f.Name()
-		slog.Info("mask", "name", tmp)
+		slog.Debug("mask", "path", tmp)
 		img := image.NewRGBA(image.Rect(0, 0, *w, *h))
-		// Testing:
 		white := color.RGBA{255, 255, 255, 255}
-		black := color.RGBA{0, 0, 0, 255}
 		for x := 0; x < *w; x++ {
-			for y := 0; y < *h; y++ {
-				img.Set(x, y, black)
-			}
-		}
-		for x := 0; x < 10; x++ {
 			for y := 0; y < *h; y++ {
 				img.Set(x, y, white)
 			}
 		}
+		if false {
+			// Testing: use a partial mask.
+			for x := 100; x < *w; x++ {
+				for y := 0; y < *h; y++ {
+					img.Set(x, y, color.RGBA{})
+				}
+			}
+		}
+
 		if err = png.Encode(f, img); err != nil {
 			_ = os.Remove(tmp)
 			return err
