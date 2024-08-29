@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -378,7 +379,7 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 
 	style := "normal"
 	//style = "normal_no_mask"
-	//style = "both"
+	style = "both"
 	//style = "motion_only"
 	args := []string{
 		"ffmpeg",
@@ -386,8 +387,17 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		"-loglevel", "error",
 		"-fflags", "nobuffer",
 		"-analyzeduration", "0",
+	}
 
-		"-f", "v4l2",
+	switch runtime.GOOS {
+	case "darwin":
+		args = append(args, "-f", "avfoundation")
+	case "linux":
+		args = append(args, "-f", "v4l2")
+	default:
+		return errors.New("not implemented for this OS")
+	}
+	args = append(args,
 		"-video_size", size,
 		"-framerate", strconv.Itoa(fps),
 		"-i", cam,
@@ -395,7 +405,7 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 
 		"-filter_complex", constructFilterGraph(style, size),
 		"-map", "[out]",
-	}
+	)
 
 	if true {
 		// Testing:
@@ -520,12 +530,21 @@ func mainImpl() error {
 		level.Set(slog.LevelDebug)
 	}
 	if *cam == "" {
-		c := exec.CommandContext(ctx, "v4l2-ctl", "--list-devices")
-		out, err := c.CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("fail to run v4l2-ctl, try 'sudo apt install v4l-utils'? %w", err)
+		var out []byte
+		var err error
+		switch runtime.GOOS {
+		case "darwin":
+			c := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", "")
+			out, _ = c.CombinedOutput()
+		case "linux":
+			c := exec.CommandContext(ctx, "v4l2-ctl", "--list-devices")
+			if out, err = c.CombinedOutput(); err != nil {
+				return fmt.Errorf("fail to run v4l2-ctl, try 'sudo apt install v4l-utils'? %w", err)
+			}
+			// TODO gather resolutions too: v4l2-ctl --list-formats-ext -d (dev)
+		default:
+			return fmt.Errorf("-camera not specified")
 		}
-		// TODO gather resolutions: v4l2-ctl --list-formats-ext -d (dev)
 		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
 	tmp := ""
