@@ -340,9 +340,18 @@ func constructFilterGraph(style string, size string) string {
 	return out.String()
 }
 
-type motion struct {
+// motionLevel is the level of Y channel average on the image, which is the
+// amount of edge movements detected.
+type motionLevel struct {
 	t    time.Time
 	yavg float64
+}
+
+// motionEvent is a processed motionLevel to determine when motion started and
+// stopped.
+type motionEvent struct {
+	t     time.Time
+	start bool
 }
 
 // processMetadata processes metadata from ffmpeg's metadata:print filter.
@@ -351,7 +360,7 @@ type motion struct {
 //
 //	frame:1336 pts:1336    pts_time:53.44
 //	lavfi.signalstats.YAVG=0.213281
-func processMetadata(start time.Time, r io.Reader, ch chan<- motion) error {
+func processMetadata(start time.Time, r io.Reader, ch chan<- motionLevel) error {
 	b := bufio.NewScanner(r)
 	frame := 0
 	var ptsTime time.Duration
@@ -365,7 +374,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- motion) error {
 				slog.Error("metadata", "err", err2)
 				return fmt.Errorf("unexpected metadata output: %q", l)
 			}
-			ch <- motion{t: start.Add(ptsTime), yavg: yavg}
+			ch <- motionLevel{t: start.Add(ptsTime), yavg: yavg}
 			continue
 		}
 		f := strings.Fields(l)
@@ -388,6 +397,34 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- motion) error {
 	return b.Err()
 }
 
+// filterMotion converts raw Y data into motion detection events wi.
+func filterMotion(ctx context.Context, ch <-chan motionLevel, events chan<- motionEvent) {
+	const exp = 5 * time.Second
+	const ythreshold = 1.
+	done := ctx.Done()
+	var after <-chan time.Time
+	inMotion := false
+	for {
+		select {
+		case <-done:
+			return
+		case l := <-ch:
+			slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "yavg", l.yavg)
+			if l.yavg >= ythreshold {
+				after = time.After(exp - time.Now().Sub(l.t))
+				if !inMotion {
+					inMotion = true
+					events <- motionEvent{t: l.t, start: true}
+				}
+			}
+		case t := <-after:
+			events <- motionEvent{t: t, start: false}
+			inMotion = false
+		}
+	}
+}
+
+// m3u8Tmpl is the template to write a .m3u8 HLS playlist file.
 var m3u8Tmpl = template.Must(template.New("").Parse(`#EXTM3U
 #EXT-X-VERSION:6
 #EXT-X-ALLOW-CACHE:YES
@@ -398,14 +435,39 @@ var m3u8Tmpl = template.Must(template.New("").Parse(`#EXTM3U
 {{.}}
 {{end}}`))
 
-func processMotion(root string, ch <-chan motion) error {
-	// Determine if motion occurred.
+func findTSFiles(root string, start, end time.Time) ([]string, error) {
+	// TODO: would be better to not load the whole directory list, or at least
+	// partition per day or something.
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, 8)
+	s := start.Format("2006-01-02T15:04:05") + ".ts"
+	e := end.Format("2006-01-02T15:04:05") + ".ts"
+	for _, entry := range entries {
+		if n := entry.Name(); strings.HasSuffix(n, ".ts") && n >= s && n <= e {
+			out = append(out, n)
+		}
+	}
+	return out, err
+}
+
+func processMotion(root string, secsPerSegment int, ch <-chan motionEvent) error {
+	const lookBack = 5 * time.Second
+	var last time.Time
 	for event := range ch {
-		slog.Info("motion", "t", event.t.Format("2006-01-02T15:04:05.00"), "yavg", event.yavg)
-		// Look at the files written and creates a loop with the recent files.
-		files := make([]string, 4)
-		for i := 0; i < 4; i++ {
-			files[i] = event.t.Add(time.Duration(i)*4*time.Second).Format("2006-01-02T15-04-05") + ".ts"
+		// TODO: Send event to Home Assistant.
+		slog.Info("motionEvent", "t", event.t.Format("2006-01-02T15:04:05.00"), "start", event.start)
+		if event.start {
+			// Create a simple m3u8 file. Will be populated later.
+			last = event.t
+		}
+		end := event.t.Add(2)
+		// TODO: This doesn't work because the TS files to not exist yet.
+		files, err := findTSFiles(root, last.Add(-lookBack), end)
+		if err != nil {
+			return err
 		}
 		f, err := os.Create(event.t.Format("2006-01-02T15-04-05") + ".m3u8")
 		if err != nil {
@@ -430,7 +492,7 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
 	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
 	// - https://trac.ffmpeg.org/wiki/Encode/H.264
-	secsPerSegment := 4
+	secsPerSegment := 3
 	size := strconv.Itoa(w) + "x" + strconv.Itoa(h)
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -441,8 +503,10 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 		"ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
-		"-fflags", "nobuffer",
 		"-analyzeduration", "0",
+		"-avioflags", "direct",
+		"-fflags", "nobuffer",
+		"-flags", "low_delay",
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -484,7 +548,7 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 		args = append(args,
 			"-f", "hls",
 			"-hls_time", strconv.Itoa(secsPerSegment),
-			"-hls_list_size", "5",
+			"-hls_list_size", "0",
 			"-strftime", "1",
 			"-hls_allow_cache", "1",
 			"-hls_flags", "independent_segments",
@@ -493,7 +557,8 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 		)
 	}
 
-	ch := make(chan motion, 10)
+	ch := make(chan motionLevel, 10)
+	events := make(chan motionEvent, 10)
 	eg, ctx := errgroup.WithContext(ctx)
 	slog.Debug("running", "cmd", args)
 	// #nosec G204
@@ -508,7 +573,12 @@ func run(ctx context.Context, cam, style string, w, h, fps int, mask, root strin
 			defer close(ch)
 			return processMetadata(start, pr, ch)
 		})
-		eg.Go(func() error { return processMotion(root, ch) })
+		eg.Go(func() error {
+			defer close(events)
+			filterMotion(ctx, ch, events)
+			return nil
+		})
+		eg.Go(func() error { return processMotion(root, secsPerSegment, events) })
 		err = cmd.Wait()
 	}
 	_ = pw.Close()
