@@ -36,62 +36,185 @@ func getWd() string {
 	return wd
 }
 
-// createFilter constructs the argument for -filter_complex.
-func createFilter(now time.Time) string {
-	// References:
-	// - https://ffmpeg.org/ffmpeg-filters.html
+// filter is a filter supported by libavfilter.
+//
+// They are described at https://ffmpeg.org/ffmpeg-filters.html.
+type filter string
 
+func (f filter) String() string {
+	return string(f)
+}
+
+// chain is a list of filters that are piped together.
+type chain []filter
+
+func (c chain) String() string {
+	out := ""
+	for i, f := range c {
+		if i != 0 {
+			out += ","
+		}
+		out += f.String()
+	}
+	return out
+}
+
+// buildChain builds a filter chain from various filters and preexisting
+// chains.
+func buildChain(next ...any) chain {
+	var out chain
+	for _, i := range next {
+		switch t := i.(type) {
+		case filter:
+			out = append(out, t)
+		case string:
+			// Warning: error prone. It's included so we don't have to create a
+			// constant for every single filter (there's a lot!).
+			out = append(out, filter(t))
+		case chain:
+			out = append(out, t...)
+		default:
+			panic("internal error")
+		}
+	}
+	return out
+}
+
+// drawTimestamp draws the current timestamp as an overlay.
+const drawTimestamp filter = "drawtext=" +
+	"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
+	"text='%{localtime\\:%Y-%m-%d %T}':" +
+	"x=(w-text_w-10):" +
+	"y=(h-text_h-10):" +
+	"fontsize=48:" +
+	"fontcolor=white:" +
+	"box=1:" +
+	"boxcolor=black@0.5"
+
+// drawYAVG draws the YAVG on the image for debugging. Requires signalstats.
+//
+// TODO: Figure out how to round the number printed out.
+const drawYAVG filter = "drawtext=" +
+	"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
+	"text='%{metadata\\:lavfi.signalstats.YAVG}':" +
+	"x=10:" +
+	"y=10:" +
+	"fontsize=48:" +
+	"fontcolor=white:" +
+	"box=1:" +
+	"boxcolor=black@0.5"
+
+// scaleHalf reduces the image by half on both dimensions, to reduce the
+// processing power required by 75%.
+const scaleHalf filter = "scale=w=iw/2:h=ih/2"
+
+// motionEdgeDetect does motion detection by calculating the edges on the delta
+// between each images.
+var motionEdgeDetect = chain{"tblend=all_mode=difference", "edgedetect"}
+
+var motionEdgeDetectManual = chain{"tblend=all_expr='abs(A-B)'", "edgedetect"}
+
+// edgeMotionDetect calculate the deltas between the edges. Uses a minimum
+// threshold.
+//
+// Doesn't seem to be a good idea in practice.
+var edgeMotionDetect = chain{"edgedetect", "tblend=all_expr='max(abs(A-B)-0.75,0)*4'"}
+
+// discardLowYAVGFrames discards frames with YAVG value below 0.1.
+//
+// The disadvantage is that the frame number becomes off.
+const discardLowYAVGFrames filter = "metadata=mode=select:key=lavfi.signalstats.YAVG:value=0.1:function=greater"
+
+// printYAVGtoPipe prints YAVG to pipe #3. This is the first pipe specified in
+// exec.Cmd.ExtraFiles.
+const printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:file='pipe\\:3':direct=1"
+
+// discard discards the stream. Useful if only statistics (e.g. YAVG) are
+// necessary and not the stream's pixels.
+var discard = chain{"trim=end=1", "nullsink"}
+
+// stream is a stream that takes an input, passes it through a chain of filters
+// and sink into the output.
+type stream struct {
+	// sources are optional input streams like "0:v".
+	sources []string
+	chain   chain
+	// sinks are optional output streams like "tmp".
+	sinks []string
+}
+
+func (s *stream) String() string {
+	out := ""
+	for _, src := range s.sources {
+		//out += "[" + src + "]"
+		out += src
+	}
+	out += s.chain.String()
+	for _, dst := range s.sinks {
+		//out += "[" + dst + "]"
+		out += dst
+	}
+	return out
+}
+
+// filterGraph is a series of stream to pass to ffmpeg.
+type filterGraph []stream
+
+func (f filterGraph) String() string {
+	out := ""
+	for i, g := range f {
+		if i != 0 {
+			out += ";"
+		}
+		out += g.String()
+	}
+	return out
+}
+
+// constructFilterGraph constructs the argument for -filter_complex.
+func constructFilterGraph(verbose bool) string {
 	// TODO: figure out why I can't use hqdn3d once, something like
 	// "[0:v]hqdn3d[src];" then use [src] from there on.
 
-	// Start by doing edge detection.
-	filter := "[0:v]"
-	// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
-	filter += "scale=w=iw/2:h=ih/2,"
-	// Testing: filter += "[1:v]alphamerge,overlay,"
-	// Reduce noise.
-	filter += "hqdn3d,"
-	// Manual edge detection with a threshold:
-	//	filter := "edgedetect,tblend=all_expr='max(abs(A-B)-0.75,0)*4'"
-	filter += "tblend=all_mode=difference,edgedetect,"
+	if verbose {
+		// TODO: No idea why YAVG floor becomes 16 instead of 0 here.
+		f := filterGraph{
+			{
+				sources: []string{"[0:v]"},
+				chain:   buildChain("hqdn3d", motionEdgeDetect, "signalstats", printYAVGtoPipe),
+				sinks:   []string{"[v1]"},
+			},
+			{
+				sources: []string{"[v1]"},
+				chain:   buildChain(drawYAVG, "format=yuv420p"),
+				sinks:   []string{"[v2]"},
+			},
+			{
+				sources: []string{"[0:v]", "[v2]"},
+				//chain:   chain{"blend=all_expr='if(gte(B, 0.5),B,A)'", drawTimestamp},
+				chain: chain{"blend=all_mode='lighten'", drawTimestamp},
+				sinks: []string{"[out]"},
+			},
+		}
+		return f.String()
+	}
+	// alphamerge,overlay,
 
-	filter += "signalstats,"
-	// Debugging: Draw the YAVG on the image:
-	//	filter += ",drawtext=" +
-	//		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
-	//		"text='%{metadata\\:lavfi.signalstats.YAVG}':" +
-	//		"x=10:" +
-	//		"y=10:" +
-	//		"fontsize=48:" +
-	//		"fontcolor=white:" +
-	//		"box=1:" +
-	//		"boxcolor=black@0.5:"
-
-	// Select frames where YAVG is high enough. The disadvantage is that the
-	// frame number becomes off.
-	filter += "metadata=mode=select:key=lavfi.signalstats.YAVG:value=0.1:function=greater,"
-	filter += "metadata=print:key=lavfi.signalstats.YAVG:file='pipe\\:3':direct=1,"
-
-	filter += "trim=end=1,nullsink"
-	//filter += "[v1]"
-
-	// Debugging: Blend both video streams:
-	filter += "; [0:v]"
-	//filter += "[v1]blend=all_expr='if(gte(B, 0.5),B,A)',"
-	filter += "hqdn3d"
-
-	// Draw the current time as an overlay.
-	filter += ",drawtext=" +
-		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
-		"text='%{pts\\:localtime\\:" + strconv.FormatInt(now.Unix(), 10) + "\\:%Y-%m-%d %T}':" +
-		"x=(w-text_w-10):" +
-		"y=(h-text_h-10):" +
-		"fontsize=48:" +
-		"fontcolor=white:" +
-		"box=1:" +
-		"boxcolor=black@0.5"
-	filter += "[out]"
-	return filter
+	f := filterGraph{
+		{
+			sources: []string{"[0:v]"},
+			// Speed up (? To be confirmed) edge detection by reducing the image by 4x
+			// and reduce noise.
+			chain: buildChain(
+				scaleHalf, "hqdn3d", motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, discard),
+		},
+		{
+			sources: []string{"[0:v]"},
+			chain:   chain{"hqdn3d", drawTimestamp},
+			sinks:   []string{"[out]"},
+		},
+	}
+	return f.String()
 }
 
 func run(ctx context.Context, cam string, w, h, fps int, mask, root string) error {
@@ -111,49 +234,57 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 	}
 	defer pr.Close()
 
-	start := time.Now()
-
-	// #nosec G204
-	cmd := exec.CommandContext(ctx, "ffmpeg",
+	args := []string{
+		"ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
 		"-fflags", "nobuffer",
 		"-analyzeduration", "0",
-		// Testing:
 		"-f", "v4l2",
 		"-video_size", size,
 		"-framerate", strconv.Itoa(fps),
+		// Testing:
 		"-t", "00:00:05",
 		"-i", cam,
 		//"-i", mask,
 		//"-f", "lavfi",
 		//"-i", "color=c=black:s="+size,
-		"-filter_complex", createFilter(start),
+		"-filter_complex", constructFilterGraph(true),
 		"-map", "[out]",
+	}
 
-		// h264
+	// Codec (h264):
+	args = append(args,
 		"-c:v", "libx264",
 		"-x264opts", "keyint="+strconv.Itoa(fps*secsPerSegment)+":min-keyint="+strconv.Itoa(fps*secsPerSegment)+":no-scenecut",
 		"-preset", "fast",
-
-		// MP4:
-		//	"-movflags", "+faststart",
-		//	"foo.mp4",
-
-		// Sequence of images:
-		//	"-qscale:v", "2",
-		//	"output_frames_%04d.jpg",
-
-		// HLS
-		"-f", "hls",
-		"-hls_time", strconv.Itoa(secsPerSegment),
-		"-hls_list_size", "5",
-		"-strftime", "1",
-		"-hls_allow_cache", "1",
-		"-hls_flags", "independent_segments",
-		"-hls_segment_filename", "%Y-%m-%dT%H-%M-%S.ts",
-		"output_playlist.m3u8",
 	)
+	// Sequence of images (don't forget to disable h264)
+	if false {
+		args = append(args, "-qscale:v", "2", "output_frames_%04d.jpg")
+	}
+	// MP4
+	if false {
+		args = append(args, "-movflags", "+faststart", "foo.mp4")
+	}
+	// HLS
+	if true {
+		args = append(args,
+			"-f", "hls",
+			"-hls_time", strconv.Itoa(secsPerSegment),
+			"-hls_list_size", "5",
+			"-strftime", "1",
+			"-hls_allow_cache", "1",
+			"-hls_flags", "independent_segments",
+			"-hls_segment_filename", "%Y-%m-%dT%H-%M-%S.ts",
+			"output_playlist.m3u8",
+		)
+	}
+
+	slog.Debug("running", "cmd", args)
+	start := time.Now()
+	// #nosec G204
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -174,7 +305,7 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		var err2 error
 		for b.Scan() {
 			l := b.Text()
-			// fmt.Printf("%s\n", l)
+			slog.Debug("metadata", "l", l)
 			if a, ok := strings.CutPrefix(l, "lavfi.signalstats.YAVG="); ok {
 				if yavg, err2 = strconv.ParseFloat(a, 64); err2 != nil {
 					slog.Error("metadata", "err", err2)
@@ -214,8 +345,10 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 }
 
 func mainImpl() error {
+	var level slog.LevelVar
+	level.Set(slog.LevelInfo)
 	logger := slog.New(tint.NewHandler(colorable.NewColorable(os.Stderr), &tint.Options{
-		Level:      slog.LevelDebug,
+		Level:      &level,
 		TimeFormat: time.TimeOnly,
 		NoColor:    !isatty.IsTerminal(os.Stderr.Fd()),
 	}))
@@ -226,12 +359,16 @@ func mainImpl() error {
 	fps := flag.Int("fps", 15, "frame rate")
 	mask := flag.String("mask", "", "mask to use")
 	root := flag.String("root", getWd(), "root directory")
+	verbose := flag.Bool("v", false, "verbose")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 
 	if flag.NArg() != 0 {
 		return errors.New("unexpected argument")
+	}
+	if *verbose {
+		level.Set(slog.LevelDebug)
 	}
 	if *cam == "" {
 		c := exec.CommandContext(ctx, "v4l2-ctl", "--list-devices")
