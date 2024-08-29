@@ -109,8 +109,13 @@ const drawYAVG filter = "drawtext=" +
 const scaleHalf filter = "scale=w=iw/2:h=ih/2"
 
 // motionEdgeDetect does motion detection by calculating the edges on the delta
-// between each images.
-var motionEdgeDetect = chain{"tblend=all_mode=difference", "edgedetect", "framerate=fps=15:flags=0"}
+// between each frame pairs.
+var motionEdgeDetect = chain{
+	// Do edge detection. This effectively half the frame rate.
+	"tblend=all_mode=difference", "edgedetect",
+	// Duplicate each frames and reset the frame time stamps.
+	"tpad=stop_mode=clone:stop_duration=1", "setpts=N/FRAME_RATE/TB",
+}
 
 var motionEdgeDetectManual = chain{"tblend=all_expr='abs(A-B)'", "edgedetect"}
 
@@ -128,10 +133,6 @@ const discardLowYAVGFrames filter = "metadata=mode=select:key=lavfi.signalstats.
 // printYAVGtoPipe prints YAVG to pipe #3. This is the first pipe specified in
 // exec.Cmd.ExtraFiles.
 const printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:file='pipe\\:3':direct=1"
-
-// discard discards the stream. Useful if only statistics (e.g. YAVG) are
-// necessary and not the stream's pixels.
-var discard = chain{"trim=end=1", "nullsink"}
 
 // stream is a stream that takes an input, passes it through a chain of filters
 // and sink into the output.
@@ -178,7 +179,6 @@ func constructFilterGraph(style string, size string) string {
 	var out filterGraph
 	switch style {
 	case "normal":
-		// TODO: Doesn't work.
 		out = filterGraph{
 			{
 				sources: []string{"[0:v]"},
@@ -187,16 +187,21 @@ func constructFilterGraph(style string, size string) string {
 			},
 			{
 				sources: []string{"[1:v]"},
-				chain:   buildChain("scale=" + size),
+				chain:   buildChain("scale="+size, scaleHalf),
 				sinks:   []string{"[mask]"},
 			},
 			{
-				sources: []string{"[src1][mask]"},
+				sources: []string{"[src1]"},
+				chain:   buildChain(scaleHalf),
+				sinks:   []string{"[srcHalf]"},
+			},
+			{
+				sources: []string{"[srcHalf][mask]"},
 				chain:   buildChain("alphamerge"),
 				sinks:   []string{"[alpha]"},
 			},
 			{
-				chain: buildChain("color=color=black:size=" + size),
+				chain: buildChain("color=color=black:size="+size, scaleHalf),
 				sinks: []string{"[black]"},
 			},
 			{
@@ -206,10 +211,7 @@ func constructFilterGraph(style string, size string) string {
 			},
 			{
 				sources: []string{"[masked]"},
-				// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
-				// discardLowYAVGFrames,
-				chain: buildChain(
-					scaleHalf, motionEdgeDetect, "signalstats", printYAVGtoPipe, discard),
+				chain:   buildChain(motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, "nullsink"),
 			},
 			{
 				sources: []string{"[src2]"},
@@ -226,9 +228,7 @@ func constructFilterGraph(style string, size string) string {
 			},
 			{
 				sources: []string{"[src1]"},
-				// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
-				chain: buildChain(
-					scaleHalf, motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, discard),
+				chain:   buildChain(scaleHalf, motionEdgeDetect, "signalstats", discardLowYAVGFrames, printYAVGtoPipe, "nullsink"),
 			},
 			{
 				sources: []string{"[src2]"},
@@ -240,97 +240,22 @@ func constructFilterGraph(style string, size string) string {
 		out = filterGraph{
 			{
 				sources: []string{"[0:v]"},
-				chain:   buildChain("hqdn3d"),
+				chain:   buildChain("hqdn3d", scaleHalf),
 				sinks:   []string{"[src]"},
 			},
 			{
 				sources: []string{"[1:v]"},
-				chain:   buildChain("scale=" + size),
-				sinks:   []string{"[mask]"},
-			},
-			{
-				sources: []string{"[src][mask]"},
-				chain:   buildChain("alphamerge"),
-				sinks:   []string{"[alpha]"},
-			},
-			{
-				chain: buildChain("color=color=black:size=" + size),
-				sinks: []string{"[black]"},
-			},
-			{
-				sources: []string{"[black][alpha]"},
-				chain:   buildChain("overlay"),
-				sinks:   []string{"[masked]"},
-			},
-			{
-				sources: []string{"[masked]"},
-				chain:   buildChain(scaleHalf, motionEdgeDetect, "signalstats", printYAVGtoPipe),
-				sinks:   []string{"[out]"},
-			},
-		}
-	case "debug":
-		// TODO: No idea why YAVG floor becomes 16 instead of 0 here.
-		out = filterGraph{
-			{
-				sources: []string{"[0:v]"},
-				chain:   buildChain("hqdn3d", "split=2"),
-				sinks:   []string{"[src1]", "[src2]"},
-			},
-			{
-				sources: []string{"[1:v]"},
-				chain:   buildChain("scale=" + size),
-				sinks:   []string{"[mask]"},
-			},
-			{
-				sources: []string{"[src1][mask]"},
-				chain:   buildChain("alphamerge"),
-				sinks:   []string{"[alpha]"},
-			},
-			{
-				chain: buildChain("color=color=black:size=" + size),
-				sinks: []string{"[black]"},
-			},
-			{
-				sources: []string{"[black][alpha]"},
-				chain:   buildChain("overlay"),
-				sinks:   []string{"[masked]"},
-			},
-			{
-				sources: []string{"[masked]"},
-				chain:   buildChain(motionEdgeDetect, "signalstats", printYAVGtoPipe, drawYAVG, "format=yuv420p"),
-				sinks:   []string{"[motion]"},
-			},
-			{
-				sources: []string{"[src2]", "[motion]"},
-				//chain:   buildChain("blend=all_expr='if(gte(B, 0.5),B,A)'", drawTimestamp),
-				chain: buildChain("blend=all_mode='lighten'", drawTimestamp),
-				sinks: []string{"[out]"},
-			},
-		}
-	case "all3":
-		out = filterGraph{
-			{
-				sources: []string{"[0:v]"},
-				chain:   buildChain("hqdn3d", "split=2"),
-				sinks:   []string{"[src1]", "[src2]"},
-			},
-			{
-				sources: []string{"[1:v]"},
-				chain:   buildChain("scale="+size, "split=2"),
+				chain:   buildChain("scale="+size, scaleHalf, "split=2"),
 				sinks:   []string{"[mask1]", "[mask2]"},
 			},
 			{
-				sources: []string{"[src1][mask1]"},
+				sources: []string{"[src][mask1]"},
 				chain:   buildChain("alphamerge"),
 				sinks:   []string{"[alpha]"},
 			},
 			{
-				chain: buildChain("color=color=black:size=" + size),
+				chain: buildChain("color=color=black:size="+size, scaleHalf),
 				sinks: []string{"[black]"},
-			},
-			{
-				chain: buildChain("color=color=green:size="+size, scaleHalf),
-				sinks: []string{"[green]"},
 			},
 			{
 				sources: []string{"[black][alpha]"},
@@ -339,27 +264,92 @@ func constructFilterGraph(style string, size string) string {
 			},
 			{
 				sources: []string{"[masked]"},
-				chain:   buildChain(scaleHalf, motionEdgeDetect, "signalstats", printYAVGtoPipe, drawYAVG),
+				chain:   buildChain(motionEdgeDetect, "signalstats", printYAVGtoPipe),
+				sinks:   []string{"[motion]"},
+			},
+			{
+				chain: buildChain("color=color=red:size="+size, scaleHalf),
+				sinks: []string{"[red]"},
+			},
+			{
+				sources: []string{"[mask2]"},
+				chain:   buildChain("lut=y=negval"),
+				sinks:   []string{"[maskneg]"},
+			},
+			{
+				sources: []string{"[red][maskneg]"},
+				chain:   buildChain("alphamerge"),
+				sinks:   []string{"[maskedred]"},
+			},
+			{
+				sources: []string{"[motion][maskedred]"},
+				chain:   buildChain("overlay"),
+				sinks:   []string{"[out]"},
+			},
+		}
+	case "both":
+		out = filterGraph{
+			{
+				sources: []string{"[0:v]"},
+				chain:   buildChain("hqdn3d", "split=2"),
+				sinks:   []string{"[src1]", "[src2]"},
+			},
+			{
+				sources: []string{"[1:v]"},
+				chain:   buildChain("scale="+size, scaleHalf, "split=2"),
+				sinks:   []string{"[mask1]", "[mask2]"},
+			},
+			{
+				sources: []string{"[src1]"},
+				chain:   buildChain(scaleHalf),
+				sinks:   []string{"[srcHalf]"},
+			},
+			{
+				sources: []string{"[srcHalf][mask1]"},
+				chain:   buildChain("alphamerge"),
+				sinks:   []string{"[alpha]"},
+			},
+			{
+				chain: buildChain("color=color=black:size="+size, scaleHalf),
+				sinks: []string{"[black]"},
+			},
+			{
+				sources: []string{"[black][alpha]"},
+				chain:   buildChain("overlay"),
+				sinks:   []string{"[masked]"},
+			},
+			{
+				sources: []string{"[masked]"},
+				chain:   buildChain(motionEdgeDetect, "signalstats", printYAVGtoPipe, drawYAVG),
 				sinks:   []string{"[motion]"},
 			},
 			{
 				sources: []string{"[src2]"},
-				chain:   buildChain(drawTimestamp, "pad=iw*2.5:ih"),
+				chain:   buildChain(drawTimestamp, "pad='iw*1.5':ih"),
 				sinks:   []string{"[out1]"},
 			},
 			{
-				sources: []string{"[out1][mask2]"},
-				chain:   buildChain("overlay=w"),
+				chain: buildChain("color=color=red:size="+size, scaleHalf),
+				sinks: []string{"[red]"},
+			},
+			{
+				sources: []string{"[mask2]"},
+				chain:   buildChain("lut=y=negval"),
+				sinks:   []string{"[maskneg]"},
+			},
+			{
+				sources: []string{"[red][maskneg]"},
+				chain:   buildChain("alphamerge"),
+				sinks:   []string{"[maskedred]"},
+			},
+			{
+				sources: []string{"[motion][maskedred]"},
+				chain:   buildChain("overlay"),
 				sinks:   []string{"[out2]"},
 			},
 			{
-				sources: []string{"[out2][motion]"},
-				chain:   buildChain("overlay='4*w'"),
-				sinks:   []string{"[out3]"},
-			},
-			{
-				sources: []string{"[out3][green]"},
-				chain:   buildChain("overlay='4*w':h"),
+				sources: []string{"[out1][out2]"},
+				chain:   buildChain("overlay='2*w'"),
 				sinks:   []string{"[out]"},
 			},
 		}
@@ -388,9 +378,8 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 
 	style := "normal"
 	//style = "normal_no_mask"
+	//style = "both"
 	//style = "motion_only"
-	//style = "debug"
-	style = "all3"
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
