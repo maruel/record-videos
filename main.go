@@ -120,12 +120,6 @@ var motionEdgeDetect = chain{
 	"tpad=stop_mode=clone:stop_duration=1", "setpts=N/FRAME_RATE/TB",
 }
 
-// edgeMotionDetect calculate the deltas between the edges. Uses a minimum
-// threshold.
-//
-// Doesn't seem to be a good idea in practice.
-var edgeMotionDetect = chain{"edgedetect", "tblend=all_expr='max(abs(A-B)-0.75,0)*4'"}
-
 // printYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
 //
 // Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
@@ -402,8 +396,7 @@ var m3u8Tmpl = template.Must(template.New("").Parse(`#EXTM3U
 #EXT-X-INDEPENDENT-SEGMENTS
 {{range .}}#EXTINF:4.000000,
 {{.}}
-{{end}}
-`))
+{{end}}`))
 
 func processMotion(root string, ch <-chan motion) error {
 	// Determine if motion occurred.
@@ -412,7 +405,7 @@ func processMotion(root string, ch <-chan motion) error {
 		// Look at the files written and creates a loop with the recent files.
 		files := make([]string, 4)
 		for i := 0; i < 4; i++ {
-			files[i] = event.t.Format("2006-01-02T15-04-05") + ".ts"
+			files[i] = event.t.Add(time.Duration(i)*4*time.Second).Format("2006-01-02T15-04-05") + ".ts"
 		}
 		f, err := os.Create(event.t.Format("2006-01-02T15-04-05") + ".m3u8")
 		if err != nil {
@@ -555,7 +548,7 @@ func mainImpl() error {
 	slog.SetDefault(logger)
 	cam := flag.String("camera", "", "camera to use")
 	w := flag.Int("w", 1280, "width")
-	h := flag.Int("h", 768, "height")
+	h := flag.Int("h", 720, "height")
 	fps := flag.Int("fps", 15, "frame rate")
 	style := styleVar("normal")
 	flag.Var(&style, "style", "style to use")
