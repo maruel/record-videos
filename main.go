@@ -36,27 +36,28 @@ func getWd() string {
 	return wd
 }
 
-func run(ctx context.Context, cam string, w, h, fps int, mask, root string) error {
-	start := time.Now()
-	secsPerSegment := 4
-
+// createFilter constructs the argument for -filter_complex.
+func createFilter(now time.Time) string {
 	// References:
-	// - https://ffmpeg.org/ffmpeg-codecs.html
 	// - https://ffmpeg.org/ffmpeg-filters.html
-	// - https://ffmpeg.org/ffmpeg-formats.html
-	// - https://ffmpeg.org/ffmpeg-utils.html
-	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
-	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
-	// - https://trac.ffmpeg.org/wiki/Encode/H.264
 
-	// Do edge detection.
+	// TODO: figure out why I can't use hqdn3d once, something like
+	// "[0:v]hqdn3d[src];" then use [src] from there on.
+
+	// Start by doing edge detection.
+	filter := "[0:v]"
 	// Speed up (? To be confirmed) edge detection by reducing the image by 4x.
+	filter += "scale=w=iw/2:h=ih/2,"
+	// Testing: filter += "[1:v]alphamerge,overlay,"
+	// Reduce noise.
+	filter += "hqdn3d,"
 	// Manual edge detection with a threshold:
-	//	edgedetect := "edgedetect,tblend=all_expr='max(abs(A-B)-0.75,0)*4'"
-	edgedetect := "scale=w=iw/2:h=ih/2,hqdn3d,tblend=all_mode=difference,edgedetect"
-	edgedetect += ",signalstats"
+	//	filter := "edgedetect,tblend=all_expr='max(abs(A-B)-0.75,0)*4'"
+	filter += "tblend=all_mode=difference,edgedetect,"
+
+	filter += "signalstats,"
 	// Debugging: Draw the YAVG on the image:
-	//	edgedetect += ",drawtext=" +
+	//	filter += ",drawtext=" +
 	//		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
 	//		"text='%{metadata\\:lavfi.signalstats.YAVG}':" +
 	//		"x=10:" +
@@ -65,37 +66,52 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 	//		"fontcolor=white:" +
 	//		"box=1:" +
 	//		"boxcolor=black@0.5:"
+
 	// Select frames where YAVG is high enough. The disadvantage is that the
 	// frame number becomes off.
-	edgedetect += ",metadata=mode=select:key=lavfi.signalstats.YAVG:value=0.1:function=greater"
-	pr, pw, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	defer pr.Close()
-	edgedetect += ",metadata=print:key=lavfi.signalstats.YAVG"
-	edgedetect += ":file='pipe\\:3':direct=1"
-	// Debugging: Send to a file instead:
-	//	edgedetect += ":file=yavg.log"
+	filter += "metadata=mode=select:key=lavfi.signalstats.YAVG:value=0.1:function=greater,"
+	filter += "metadata=print:key=lavfi.signalstats.YAVG:file='pipe\\:3':direct=1,"
+
+	filter += "trim=end=1,nullsink"
+	//filter += "[v1]"
+
+	// Debugging: Blend both video streams:
+	filter += "; [0:v]"
+	//filter += "[v1]blend=all_expr='if(gte(B, 0.5),B,A)',"
+	filter += "hqdn3d"
 
 	// Draw the current time as an overlay.
-	epoch := strconv.FormatInt(start.Unix(), 10)
-	drawtimestamp := "drawtext=" +
+	filter += ",drawtext=" +
 		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
-		"text='%{pts\\:localtime\\:" + epoch + "\\:%Y-%m-%d %T}':" +
+		"text='%{pts\\:localtime\\:" + strconv.FormatInt(now.Unix(), 10) + "\\:%Y-%m-%d %T}':" +
 		"x=(w-text_w-10):" +
 		"y=(h-text_h-10):" +
 		"fontsize=48:" +
 		"fontcolor=white:" +
 		"box=1:" +
-		"boxcolor=black@0.5:"
+		"boxcolor=black@0.5"
+	filter += "[out]"
+	return filter
+}
 
-	// The final filter:
-	// TODO: figure out why I can't use hqdn3d once, something like "[0:v]hqdn3d[src];".
-	filter := "[0:v]" + edgedetect + ",trim=end=1,nullsink" // "[v1]"
-	// Debugging: Blend both video streams:
-	//	filter += "; [0:v][v1]hqdn3d,blend=all_expr='if(gte(B, 0.5),B,A)'," + drawtimestamp + "[out]"
-	filter += "; [0:v]hqdn3d," + drawtimestamp + "[out]"
+func run(ctx context.Context, cam string, w, h, fps int, mask, root string) error {
+	// References:
+	// - https://ffmpeg.org/ffmpeg-all.html
+	// - https://ffmpeg.org/ffmpeg-codecs.html
+	// - https://ffmpeg.org/ffmpeg-formats.html
+	// - https://ffmpeg.org/ffmpeg-utils.html
+	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
+	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
+	// - https://trac.ffmpeg.org/wiki/Encode/H.264
+	secsPerSegment := 4
+	size := strconv.Itoa(w) + "x" + strconv.Itoa(h)
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer pr.Close()
+
+	start := time.Now()
 
 	// #nosec G204
 	cmd := exec.CommandContext(ctx, "ffmpeg",
@@ -103,23 +119,22 @@ func run(ctx context.Context, cam string, w, h, fps int, mask, root string) erro
 		"-loglevel", "error",
 		"-fflags", "nobuffer",
 		"-analyzeduration", "0",
-		"-f", "v4l2",
-		"-video_size", strconv.Itoa(w)+"x"+strconv.Itoa(h),
-		"-framerate", strconv.Itoa(fps),
-		"-i", cam,
 		// Testing:
-		"-t", "00:00:10",
-
+		"-f", "v4l2",
+		"-video_size", size,
+		"-framerate", strconv.Itoa(fps),
+		"-t", "00:00:05",
+		"-i", cam,
 		//"-i", mask,
-
-		// Create a stream of edge detection difference.
-		"-filter_complex", filter,
+		//"-f", "lavfi",
+		//"-i", "color=c=black:s="+size,
+		"-filter_complex", createFilter(start),
 		"-map", "[out]",
 
 		// h264
 		"-c:v", "libx264",
 		"-x264opts", "keyint="+strconv.Itoa(fps*secsPerSegment)+":min-keyint="+strconv.Itoa(fps*secsPerSegment)+":no-scenecut",
-		"-preset", "slow",
+		"-preset", "fast",
 
 		// MP4:
 		//	"-movflags", "+faststart",
@@ -236,9 +251,17 @@ func mainImpl() error {
 		// TODO:
 		// *mask = "color=c=white:s=640x400"
 		tmp = f.Name()
+		slog.Info("mask", "name", tmp)
 		img := image.NewRGBA(image.Rect(0, 0, *w, *h))
+		// Testing:
 		white := color.RGBA{255, 255, 255, 255}
+		black := color.RGBA{0, 0, 0, 255}
 		for x := 0; x < *w; x++ {
+			for y := 0; y < *h; y++ {
+				img.Set(x, y, black)
+			}
+		}
+		for x := 0; x < 10; x++ {
 			for y := 0; y < *h; y++ {
 				img.Set(x, y, white)
 			}
