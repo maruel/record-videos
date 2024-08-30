@@ -158,7 +158,7 @@ func (f filterGraph) String() string {
 }
 
 // constructFilterGraph constructs the argument for -filter_complex.
-func constructFilterGraph(style string, size string) string {
+func constructFilterGraph(style string, size string) filterGraph {
 	// I could use scale2ref instead of manually specifying size for the black
 	// mask buffer but I am guessing this will be significantly slower.
 	var out filterGraph
@@ -311,7 +311,7 @@ func constructFilterGraph(style string, size string) string {
 			{
 				sources: []string{"[src2]"},
 				chain:   buildChain(drawTimestamp, "pad='iw*1.5':ih"),
-				sinks:   []string{"[out1]"},
+				sinks:   []string{"[overlay1]"},
 			},
 			{
 				chain: buildChain("color=color=red:size="+size, scaleHalf),
@@ -330,10 +330,10 @@ func constructFilterGraph(style string, size string) string {
 			{
 				sources: []string{"[motion][maskedred]"},
 				chain:   buildChain("overlay"),
-				sinks:   []string{"[out2]"},
+				sinks:   []string{"[overlay2]"},
 			},
 			{
-				sources: []string{"[out1][out2]"},
+				sources: []string{"[overlay1][overlay2]"},
 				chain:   buildChain("overlay='2*w'"),
 				sinks:   []string{"[out]"},
 			},
@@ -341,7 +341,7 @@ func constructFilterGraph(style string, size string) string {
 	default:
 		panic("unknown style " + style)
 	}
-	return out.String()
+	return out
 }
 
 // motionLevel is the level of Y channel average on the image, which is the
@@ -469,6 +469,7 @@ func generateM3U8(root string, t, start, end time.Time) error {
 		return err
 	}
 	name := filepath.Join(root, t.Format("2006-01-02T15-04-05")+".m3u8")
+	// #nosec G304
 	f, err := os.Create(name + ".tmp")
 	if err != nil {
 		return err
@@ -594,7 +595,7 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 		Handler:      &m,
 		BaseContext:  func(net.Listener) context.Context { return ctx },
 		ReadTimeout:  10. * time.Second,
-		WriteTimeout: 10. * time.Second,
+		WriteTimeout: 366 * 24 * time.Hour,
 		IdleTimeout:  10. * time.Second,
 	}
 	l, err := net.Listen("tcp", addr)
@@ -626,7 +627,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	defer metadataR.Close()
 	defer func() {
 		if metadataW != nil {
-			metadataW.Close()
+			_ = metadataW.Close()
 		}
 	}()
 	mjpegR, mjpegW, err := os.Pipe()
@@ -636,7 +637,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	defer mjpegR.Close()
 	defer func() {
 		if mjpegW != nil {
-			mjpegW.Close()
+			_ = mjpegW.Close()
 		}
 	}()
 	args := []string{
@@ -663,45 +664,61 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		"-framerate", strconv.Itoa(fps),
 		"-i", cam,
 		"-i", mask,
-		"-filter_complex", constructFilterGraph(style, size),
-		"-map", "[out]",
+	)
+	fg := constructFilterGraph(style, size)
+	hlsOut := "[out]"
+	// MJPEG stream
+	if addr != "" {
+		fg = append(fg,
+			stream{
+				sources: []string{"[out]"},
+				chain:   buildChain("split=2"),
+				sinks:   []string{"[outHLS]", "[out2]"},
+			},
+			stream{
+				sources: []string{"[out2]"},
+				// Cut down to 1 fps, with half resolution.
+				chain: buildChain("framestep="+strconv.Itoa(fps), scaleHalf),
+				sinks: []string{"[outMJPEG]"},
+			},
+		)
+		hlsOut = "[outHLS]"
+	}
+	args = append(args,
+		"-filter_complex", fg.String(),
 	)
 	if d > 0 {
 		// Limit runtime for local testing.
 		// https://ffmpeg.org/ffmpeg-utils.html#time-duration-syntax
 		args = append(args, "-t", fmt.Sprintf("%.1fs", float64(d)/float64(time.Second)))
 	}
-	// Codec (h264):
+
+	// HLS in h264:
 	args = append(args,
+		"-map", hlsOut,
 		"-c:v", "libx264",
 		"-preset", "fast",
 		"-crf", "30",
+		"-f", "hls",
+		"-hls_list_size", "0",
+		"-strftime", "1",
+		"-hls_allow_cache", "1",
+		"-hls_flags", "independent_segments",
+		"-hls_segment_filename", "%Y-%m-%dT%H-%M-%S.ts",
+		"all.m3u8",
 	)
-	// MP4
-	if false {
-		args = append(args, "-movflags", "+faststart", "foo.mp4")
-	}
-	// HLS
-	if true {
-		args = append(args,
-			"-f", "hls",
-			"-hls_list_size", "0",
-			"-strftime", "1",
-			"-hls_allow_cache", "1",
-			"-hls_flags", "independent_segments",
-			"-hls_segment_filename", "%Y-%m-%dT%H-%M-%S.ts",
-			"all.m3u8",
-		)
-	}
+
 	// MJPEG stream
 	if addr != "" {
-		if err := startServer(ctx, addr, mjpegR); err != nil {
+		if err = startServer(ctx, addr, mjpegR); err != nil {
 			return err
 		}
 		// https://ffmpeg.org/ffmpeg-all.html#pipe
 		args = append(args,
+			"-map", "[outMJPEG]",
 			"-f", "mjpeg",
-			"-qscale:v", "2",
+			"-q", "2",
+			//"-qscale:v", "2",
 			"pipe:4",
 		)
 		// Sequence of images (don't forget to disable h264)
