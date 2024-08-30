@@ -45,8 +45,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-//go:embed html/root.html
-var rootHTML []byte
+//go:embed html/videos.html
+var videosHTML []byte
 
 //go:embed html/list.html
 var listHTML []byte
@@ -485,24 +485,24 @@ func findTSFiles(root string, start, end time.Time) ([]string, error) {
 		return nil, err
 	}
 	out := make([]string, 0, 8)
-	s := start.Format("2006-01-02T15:04:05") + ".ts"
-	e := end.Format("2006-01-02T15:04:05") + ".ts"
+	s := start.Format("2006-01-02T15-04-05") + ".ts"
+	e := end.Format("2006-01-02T15-04-05") + ".ts"
 	for _, entry := range entries {
 		if n := entry.Name(); strings.HasSuffix(n, ".ts") && n >= s && n <= e {
 			out = append(out, n)
 		}
 	}
-	slog.Debug("findTSFiles", "total", len(entries), "found", len(out))
+	slog.Debug("findTSFiles", "start", s, "end", e, "total", len(entries), "found", len(out))
 	return out, err
 }
 
 // generateM3U8 writes a .m3u8 in a temporary file then renames it.
 func generateM3U8(root string, t, start, end time.Time) error {
 	files, err := findTSFiles(root, start, end)
-	slog.Debug("generateM3U8", "t", t, "start", start, "end", end, "files", files)
 	if err != nil || len(files) == 0 {
 		return err
 	}
+	slog.Debug("generateM3U8", "t", t, "start", start, "end", end, "files", files)
 	name := filepath.Join(root, t.Format("2006-01-02T15-04-05")+".m3u8")
 	// #nosec G304
 	f, err := os.Create(name + ".tmp")
@@ -535,27 +535,30 @@ func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEv
 	// libx264 can buffer 30s at a time.
 	const lookBack = 31 * time.Second
 	const reprocess = time.Minute
-	var toProcess [][3]time.Time
+	var toGen [][3]time.Time
 	var last time.Time
-	var after <-chan time.Time
+	var retryGen <-chan time.Time
 	for {
 		select {
-		case n := <-after:
-			for len(toProcess) != 0 {
-				if n.After(toProcess[0][2]) {
-					if err := generateM3U8(root, toProcess[0][0], toProcess[0][1], toProcess[0][2]); err != nil {
+		case n := <-retryGen:
+			for len(toGen) != 0 {
+				if l := toGen[0]; n.After(l[2]) {
+					// Best effort.
+					if err := generateM3U8(root, l[0], l[1], l[2]); err != nil {
 						return err
 					}
-					toProcess = toProcess[1:]
+					toGen = toGen[1:]
 				}
+			}
+			if len(toGen) != 0 {
+				retryGen = time.After(reprocess)
 			}
 		case event, ok := <-ch:
 			if !ok {
-				for len(toProcess) != 0 {
-					if err := generateM3U8(root, toProcess[0][0], toProcess[0][1], toProcess[0][2]); err != nil {
+				for _, l := range toGen {
+					if err := generateM3U8(root, l[0], l[1], l[2]); err != nil {
 						return err
 					}
-					toProcess = toProcess[1:]
 				}
 				return nil
 			}
@@ -570,8 +573,8 @@ func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEv
 				return err
 			}
 			if !event.start {
-				toProcess = append(toProcess, [...]time.Time{event.t, start, end})
-				after = time.After(reprocess)
+				toGen = append(toGen, [...]time.Time{event.t, start, end})
+				retryGen = time.After(reprocess)
 			}
 			if event.start {
 				if onEventStart != "" {
@@ -774,7 +777,7 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		h.Set("Pragma", "no-cache")
 		h.Set("Expires", "0")
 		h.Set("Content-Type", "text/html; charset=utf-8")
-		if _, err2 := w.Write(rootHTML); err2 != nil {
+		if _, err2 := w.Write(videosHTML); err2 != nil {
 			return
 		}
 		_ = dataTmpl.Execute(w, map[string]any{"files": files})

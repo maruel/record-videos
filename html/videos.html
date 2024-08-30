@@ -20,10 +20,13 @@ let parent = document.getElementById("players");
 function add(i, file) {
   let d = document.createElement("div");
   d.id = "d" + i;
+  // TODO: onended doesn't seem to work, we want to revert to 1x when the video
+  // reaches realtime.
   d.innerHTML = '' +
     '<a href="raw/' + escape(file) + '" target=_blank>' + file + '</a>' +
     '<video id="vid' + i + '" controls preload="none" ' +
     'onloadstart="this.playbackRate=2;" ' +
+    'onended="this.playbackRate=1;" ' +
     'controlslist="nodownload noremoteplayback" ' +
     'disablepictureinpicture disableremoteplayback ' +
     'muted><source src="raw/' + escape(file) + '" /></video>';
