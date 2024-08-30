@@ -723,8 +723,10 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	}
 	args = append(args,
 		"-video_size", size,
-		// Warning: the camera driver may decide another framerate. This will show
-		// up in ffmpeg's output only if verbose enough.
+		// Warning: the camera driver may decide another framerate. Sadly this fact
+		// is output by ffmpeg at info level, not warning level. Use the "-v" flag
+		// to see it. It looks like:
+		//	[video4linux2,v4l2 @ 0x63b48c816180] The driver changed the time per frame from 1/15 to 1/10
 		"-framerate", strconv.Itoa(fps),
 		"-i", cam,
 	)
@@ -745,8 +747,9 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 			},
 			stream{
 				sources: []string{"[out2]"},
-				chain:   buildChain("fps=fps=1", scaleHalf),
-				sinks:   []string{"[outMPJPEG]"},
+				// scaleHalf ?
+				chain: buildChain("fps=fps=1"),
+				sinks: []string{"[outMPJPEG]"},
 			},
 		)
 		hlsOut = "[outHLS]"
