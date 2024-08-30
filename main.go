@@ -19,12 +19,16 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"text/template"
 	"time"
 
@@ -368,13 +372,13 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- motionLevel) error 
 	var err2 error
 	for b.Scan() {
 		l := b.Text()
-		slog.Debug("metadata", "l", l)
+		//slog.Debug("metadata", "l", l)
 		if a, ok := strings.CutPrefix(l, "lavfi.signalstats.YAVG="); ok {
 			if yavg, err2 = strconv.ParseFloat(a, 64); err2 != nil {
 				slog.Error("metadata", "err", err2)
 				return fmt.Errorf("unexpected metadata output: %q", l)
 			}
-			ch <- motionLevel{t: start.Add(ptsTime), yavg: yavg}
+			ch <- motionLevel{t: start.Add(ptsTime).Round(100 * time.Millisecond), yavg: yavg}
 			continue
 		}
 		f := strings.Fields(l)
@@ -414,14 +418,14 @@ func filterMotion(ctx context.Context, ch <-chan motionLevel, events chan<- moti
 			}
 			slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "yavg", l.yavg)
 			if l.yavg >= ythreshold {
-				after = time.After(exp - time.Now().Sub(l.t))
+				after = time.After(exp - time.Since(l.t))
 				if !inMotion {
 					inMotion = true
 					events <- motionEvent{t: l.t, start: true}
 				}
 			}
 		case t := <-after:
-			events <- motionEvent{t: t, start: false}
+			events <- motionEvent{t: t.Round(100 * time.Millisecond), start: false}
 			inMotion = false
 		}
 	}
@@ -453,15 +457,19 @@ func findTSFiles(root string, start, end time.Time) ([]string, error) {
 			out = append(out, n)
 		}
 	}
+	slog.Debug("findTSFiles", "total", len(entries), "found", len(out))
 	return out, err
 }
 
+// generateM3U8 writes a .m3u8 in a temporary file then renames it.
 func generateM3U8(root string, t, start, end time.Time) error {
 	files, err := findTSFiles(root, start, end)
+	slog.Debug("generateM3U8", "t", t, "start", start, "end", end, "files", files)
 	if err != nil {
 		return err
 	}
-	f, err := os.Create(t.Format("2006-01-02T15-04-05") + ".m3u8")
+	name := filepath.Join(root, t.Format("2006-01-02T15-04-05")+".m3u8")
+	f, err := os.Create(name + ".tmp")
 	if err != nil {
 		return err
 	}
@@ -469,9 +477,13 @@ func generateM3U8(root string, t, start, end time.Time) error {
 	if err2 := f.Close(); err == nil {
 		err = err2
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return os.Rename(name+".tmp", name)
 }
 
+// processMotion reacts to motion start and stop events.
 func processMotion(root string, ch <-chan motionEvent) error {
 	// libx264 can buffer 30s at a time.
 	const lookBack = 31 * time.Second
@@ -520,7 +532,84 @@ func processMotion(root string, ch <-chan motionEvent) error {
 	}
 }
 
-func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, mask, root string) error {
+type writerLock struct {
+	ch chan struct{}
+	w  io.Writer
+}
+
+// multiWriter is similar to io.MultiWriter excepts that it swallows errors and
+// removes the writes automatically.
+type multiWriter struct {
+	mu sync.Mutex
+	w  []*writerLock
+}
+
+func (m *multiWriter) enqueue(w io.Writer) {
+	l := &writerLock{ch: make(chan struct{}), w: w}
+	m.mu.Lock()
+	m.w = append(m.w, l)
+	m.mu.Unlock()
+	<-l.ch
+}
+
+func (m *multiWriter) Write(p []byte) (int, error) {
+	//slog.Debug("multi", "l", len(p))
+	var w2 []*writerLock
+	m.mu.Lock()
+	if len(m.w) != 0 {
+		w2 = make([]*writerLock, len(m.w))
+		copy(w2, m.w)
+	}
+	m.mu.Unlock()
+	for i, l := range w2 {
+		//slog.Debug("multi", "l", len(p), "i", i)
+		if n, err := l.w.Write(p); err != nil || len(p) != n {
+			copy(m.w[i:], m.w[i+1:])
+			m.w = m.w[:len(m.w)-1]
+			l.ch <- struct{}{}
+		}
+	}
+	return len(p), nil
+}
+
+func startServer(ctx context.Context, addr string, r io.Reader) error {
+	m := http.ServeMux{}
+	mw := multiWriter{}
+	m.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/" {
+			http.Error(w, "Not found", http.StatusNotFound)
+			return
+		}
+		h := w.Header()
+		h.Set("Content-Type", "multipart/x-mixed-replace;boundary=ffmpeg")
+		h.Set("Connection", "close")
+		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		h.Set("Pragma", "no-cache")
+		h.Set("Expires", "0")
+		slog.Info("http", "remote", req.RemoteAddr)
+		mw.enqueue(w)
+		slog.Info("http", "remote", req.RemoteAddr, "done", true)
+	})
+	s := http.Server{
+		Handler:      &m,
+		BaseContext:  func(net.Listener) context.Context { return ctx },
+		ReadTimeout:  10. * time.Second,
+		WriteTimeout: 10. * time.Second,
+		IdleTimeout:  10. * time.Second,
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	slog.Info("serving", "addr", l.Addr())
+	go s.Serve(l)
+	go io.Copy(&mw, r)
+	// TODO: clean shutdown.
+	//s.Shutdown(context.Background())
+	return nil
+}
+
+func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, mask, root, addr string) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -530,15 +619,32 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
 	// - https://trac.ffmpeg.org/wiki/Encode/H.264
 	size := strconv.Itoa(w) + "x" + strconv.Itoa(h)
-	pr, pw, err := os.Pipe()
+	metadataR, metadataW, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	defer pr.Close()
+	defer metadataR.Close()
+	defer func() {
+		if metadataW != nil {
+			metadataW.Close()
+		}
+	}()
+	mjpegR, mjpegW, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer mjpegR.Close()
+	defer func() {
+		if mjpegW != nil {
+			mjpegW.Close()
+		}
+	}()
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
 		"-loglevel", "error",
+		"-probesize", "32",
+		"-fpsprobesize", "0",
 		"-analyzeduration", "0",
 		"-avioflags", "direct",
 		"-fflags", "nobuffer",
@@ -571,10 +677,6 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		"-preset", "fast",
 		"-crf", "30",
 	)
-	// Sequence of images (don't forget to disable h264)
-	if false {
-		args = append(args, "-qscale:v", "2", "output_frames_%04d.jpg")
-	}
 	// MP4
 	if false {
 		args = append(args, "-movflags", "+faststart", "foo.mp4")
@@ -591,6 +693,20 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 			"all.m3u8",
 		)
 	}
+	// MJPEG stream
+	if addr != "" {
+		if err := startServer(ctx, addr, mjpegR); err != nil {
+			return err
+		}
+		// https://ffmpeg.org/ffmpeg-all.html#pipe
+		args = append(args,
+			"-f", "mjpeg",
+			"-qscale:v", "2",
+			"pipe:4",
+		)
+		// Sequence of images (don't forget to disable h264)
+		//args = append(args, "-", "2", "output_frames_%04d.jpg")
+	}
 
 	ch := make(chan motionLevel, 10)
 	events := make(chan motionEvent, 10)
@@ -601,22 +717,26 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	cmd.Dir = root
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.ExtraFiles = []*os.File{pw}
-	start := time.Now()
-	if err = cmd.Start(); err == nil {
-		eg.Go(func() error {
-			defer close(ch)
-			return processMetadata(start, pr, ch)
-		})
-		eg.Go(func() error {
-			defer close(events)
-			filterMotion(ctx, ch, events)
-			return nil
-		})
-		eg.Go(func() error { return processMotion(root, events) })
-		err = cmd.Wait()
+	cmd.ExtraFiles = []*os.File{metadataW, mjpegW}
+	start := time.Now().Round(10 * time.Millisecond)
+	if err = cmd.Start(); err != nil {
+		return nil
 	}
-	_ = pw.Close()
+	_ = metadataW.Close()
+	metadataW = nil
+	_ = mjpegW.Close()
+	mjpegW = nil
+	eg.Go(func() error {
+		defer close(ch)
+		return processMetadata(start, metadataR, ch)
+	})
+	eg.Go(func() error {
+		defer close(events)
+		filterMotion(ctx, ch, events)
+		return nil
+	})
+	eg.Go(func() error { return processMotion(root, events) })
+	err = cmd.Wait()
 	if err2 := eg.Wait(); err == nil {
 		err = err2
 	}
@@ -660,6 +780,7 @@ func mainImpl() error {
 	flag.Var(&style, "style", "style to use")
 	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
 	root := flag.String("root", getWd(), "root directory to store videos into")
+	addr := flag.String("addr", "", "optional address to listen to to serve MJPEG")
 	verbose := flag.Bool("v", false, "enable verbosity")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -727,7 +848,7 @@ func mainImpl() error {
 		}
 		*mask = tmp
 	}
-	err := run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root)
+	err := run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr)
 	if tmp != "" {
 		if err2 := os.Remove(tmp); err == nil {
 			err = err2
