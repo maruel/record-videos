@@ -347,8 +347,9 @@ func constructFilterGraph(style string, size string) filterGraph {
 // motionLevel is the level of Y channel average on the image, which is the
 // amount of edge movements detected.
 type motionLevel struct {
-	t    time.Time
-	yavg float64
+	frame int
+	t     time.Time
+	yavg  float64
 }
 
 // motionEvent is a processed motionLevel to determine when motion started and
@@ -378,7 +379,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- motionLevel) error 
 				slog.Error("metadata", "err", err2)
 				return fmt.Errorf("unexpected metadata output: %q", l)
 			}
-			ch <- motionLevel{t: start.Add(ptsTime).Round(100 * time.Millisecond), yavg: yavg}
+			ch <- motionLevel{frame: frame, t: start.Add(ptsTime).Round(100 * time.Millisecond), yavg: yavg}
 			continue
 		}
 		f := strings.Fields(l)
@@ -416,8 +417,10 @@ func filterMotion(ctx context.Context, ch <-chan motionLevel, events chan<- moti
 			if !ok {
 				return
 			}
-			slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "yavg", l.yavg)
-			if l.yavg >= ythreshold {
+			slog.Info("motionLevel", "f", l.frame, "t", l.t.Format("2006-01-02T15:04:05.00"), "yavg", l.yavg)
+			// Ignore the first 5 frames when starting. Many cameras will auto-focus
+			// and cause a lot of artificial motion.
+			if l.frame >= 5 && l.yavg >= ythreshold {
 				after = time.After(exp - time.Since(l.t))
 				if !inMotion {
 					inMotion = true
@@ -533,48 +536,6 @@ func processMotion(root string, ch <-chan motionEvent) error {
 	}
 }
 
-/*
-type writerLock struct {
-	ch chan struct{}
-	w  io.Writer
-}
-
-// multiWriter is similar to io.MultiWriter excepts that it swallows errors and
-// removes the writes automatically.
-type multiWriter struct {
-	mu sync.Mutex
-	w  []*writerLock
-}
-
-func (m *multiWriter) enqueue(w io.Writer) {
-	l := &writerLock{ch: make(chan struct{}), w: w}
-	m.mu.Lock()
-	m.w = append(m.w, l)
-	m.mu.Unlock()
-	<-l.ch
-}
-
-func (m *multiWriter) Write(p []byte) (int, error) {
-	//slog.Debug("multi", "l", len(p))
-	var w2 []*writerLock
-	m.mu.Lock()
-	if len(m.w) != 0 {
-		w2 = make([]*writerLock, len(m.w))
-		copy(w2, m.w)
-	}
-	m.mu.Unlock()
-	for i, l := range w2 {
-		//slog.Debug("multi", "l", len(p), "i", i)
-		if n, err := l.w.Write(p); err != nil || len(p) != n {
-			copy(m.w[i:], m.w[i+1:])
-			m.w = m.w[:len(m.w)-1]
-			l.ch <- struct{}{}
-		}
-	}
-	return len(p), nil
-}
-*/
-
 // broadcastFrames broadcast MPJPEG frames to listeners.
 type broadcastFrames struct {
 	mu sync.Mutex
@@ -597,7 +558,11 @@ func (b *broadcastFrames) listen(ctx context.Context, r io.Reader) {
 		if err != nil {
 			return
 		}
-		slog.Debug("mjpeg", "i", i, "b", len(frame))
+		// First frame read.
+		if i == 0 {
+			slog.Info("ready")
+		}
+		//slog.Debug("mjpeg", "i", i, "b", len(frame))
 		// Expected p.Header:
 		//	Content-type: image/jpeg
 		//	Content-length: 1234
@@ -646,7 +611,6 @@ func (b *broadcastFrames) relay(ctx context.Context) iter.Seq[[]byte] {
 
 func startServer(ctx context.Context, addr string, r io.Reader) error {
 	m := http.ServeMux{}
-	//mw := multiWriter{}
 	bf := &broadcastFrames{}
 	go bf.listen(ctx, r)
 
@@ -655,6 +619,7 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
+		start := time.Now()
 		slog.Info("http", "remote", req.RemoteAddr)
 		mw := multipart.NewWriter(w)
 		defer mw.Close()
@@ -665,10 +630,6 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 		h.Set("Pragma", "no-cache")
 		h.Set("Expires", "0")
-
-		/*
-			mw.enqueue(w)
-		*/
 		i := 0
 		for frame := range bf.relay(req.Context()) {
 			slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(frame))
@@ -684,7 +645,7 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 			}
 			i++
 		}
-		slog.Info("http", "remote", req.RemoteAddr, "done", true)
+		slog.Info("http", "remote", req.RemoteAddr, "done", true, "d", time.Since(start).Round(100*time.Millisecond))
 	})
 	s := http.Server{
 		Handler:      &m,
@@ -697,9 +658,8 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("serving", "addr", l.Addr())
+	slog.Info("http", "addr", l.Addr())
 	go s.Serve(l)
-	//go io.Copy(&mw, r)
 	// TODO: clean shutdown.
 	//s.Shutdown(context.Background())
 	return nil
@@ -738,8 +698,6 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
-		// Adjust as needed:
-		"-loglevel", "error",
 		"-probesize", "32",
 		"-fpsprobesize", "0",
 		"-analyzeduration", "0",
@@ -747,6 +705,13 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
 		"-thread_queue_size", "16",
+		// Disable stats output because it uses CR character, which corrupts logs.
+		"-nostats",
+	}
+	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+		args = append(args, "-loglevel", "repeat+info")
+	} else {
+		args = append(args, "-loglevel", "repeat+warning")
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -758,6 +723,8 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	}
 	args = append(args,
 		"-video_size", size,
+		// Warning: the camera driver may decide another framerate. This will show
+		// up in ffmpeg's output only if verbose enough.
 		"-framerate", strconv.Itoa(fps),
 		"-i", cam,
 	)
@@ -778,9 +745,8 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 			},
 			stream{
 				sources: []string{"[out2]"},
-				// Cut down to 1 fps, with half resolution.
-				chain: buildChain("framestep="+strconv.Itoa(fps), scaleHalf),
-				sinks: []string{"[outMPJPEG]"},
+				chain:   buildChain("fps=fps=1", scaleHalf),
+				sinks:   []string{"[outMPJPEG]"},
 			},
 		)
 		hlsOut = "[outHLS]"
