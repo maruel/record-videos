@@ -17,6 +17,7 @@ import (
 	"io"
 	"iter"
 	"log/slog"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -379,6 +380,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- motionLevel) error 
 				slog.Error("metadata", "err", err2)
 				return fmt.Errorf("unexpected metadata output: %q", l)
 			}
+			yavg = math.Round(yavg*100) * 0.01
 			ch <- motionLevel{frame: frame, t: start.Add(ptsTime).Round(100 * time.Millisecond), yavg: yavg}
 			continue
 		}
@@ -402,10 +404,16 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- motionLevel) error 
 	return b.Err()
 }
 
-// filterMotion converts raw Y data into motion detection events wi.
-func filterMotion(ctx context.Context, ch <-chan motionLevel, events chan<- motionEvent) {
-	const exp = 5 * time.Second
+// filterMotion converts raw Y data into motion detection events.
+func filterMotion(ctx context.Context, start time.Time, ch <-chan motionLevel, events chan<- motionEvent) {
+	// Eventually configuration values:
+	const motionExpiration = 5 * time.Second
 	const ythreshold = 1.
+	// TODO: Get the ready signal from MPJPEG reader.
+	// Many cameras will auto-focus and cause a lot of artificial motion when
+	// starting up.
+	const ignoreFirstFrames = 10
+	const ignoreFirstSeconds = 5 * time.Second
 	done := ctx.Done()
 	var after <-chan time.Time
 	inMotion := false
@@ -417,11 +425,9 @@ func filterMotion(ctx context.Context, ch <-chan motionLevel, events chan<- moti
 			if !ok {
 				return
 			}
-			slog.Info("motionLevel", "f", l.frame, "t", l.t.Format("2006-01-02T15:04:05.00"), "yavg", l.yavg)
-			// Ignore the first 5 frames when starting. Many cameras will auto-focus
-			// and cause a lot of artificial motion.
-			if l.frame >= 5 && l.yavg >= ythreshold {
-				after = time.After(exp - time.Since(l.t))
+			slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "f", l.frame, "yavg", l.yavg)
+			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstSeconds && l.yavg >= ythreshold {
+				after = time.After(motionExpiration - time.Since(l.t))
 				if !inMotion {
 					inMotion = true
 					events <- motionEvent{t: l.t, start: true}
@@ -468,7 +474,7 @@ func findTSFiles(root string, start, end time.Time) ([]string, error) {
 func generateM3U8(root string, t, start, end time.Time) error {
 	files, err := findTSFiles(root, start, end)
 	slog.Debug("generateM3U8", "t", t, "start", start, "end", end, "files", files)
-	if err != nil {
+	if err != nil || len(files) == 0 {
 		return err
 	}
 	name := filepath.Join(root, t.Format("2006-01-02T15-04-05")+".m3u8")
@@ -823,7 +829,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	})
 	eg.Go(func() error {
 		defer close(events)
-		filterMotion(ctx, ch, events)
+		filterMotion(ctx, start, ch, events)
 		return nil
 	})
 	eg.Go(func() error { return processMotion(root, events) })
