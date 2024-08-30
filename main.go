@@ -407,10 +407,9 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- motionLevel) error 
 }
 
 // filterMotion converts raw Y data into motion detection events.
-func filterMotion(ctx context.Context, start time.Time, ch <-chan motionLevel, events chan<- motionEvent) {
+func filterMotion(ctx context.Context, start time.Time, yavg float64, ch <-chan motionLevel, events chan<- motionEvent) {
 	// Eventually configuration values:
 	const motionExpiration = 5 * time.Second
-	const ythreshold = 1.
 	// TODO: Get the ready signal from MPJPEG reader.
 	// Many cameras will auto-focus and cause a lot of artificial motion when
 	// starting up.
@@ -428,7 +427,7 @@ func filterMotion(ctx context.Context, start time.Time, ch <-chan motionLevel, e
 				return
 			}
 			slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "f", l.frame, "yavg", l.yavg)
-			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstMoments && l.yavg >= ythreshold {
+			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstMoments && l.yavg >= yavg {
 				after = time.After(motionExpiration - time.Since(l.t))
 				if !inMotion {
 					inMotion = true
@@ -706,7 +705,7 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 	return nil
 }
 
-func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, mask, root, addr, onEventStart, onEventEnd, webhook string) error {
+func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, yavg float64, mask, root, addr, onEventStart, onEventEnd, webhook string) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -872,7 +871,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	})
 	eg.Go(func() error {
 		defer close(events)
-		filterMotion(ctx, start, ch, events)
+		filterMotion(ctx, start, yavg, ch, events)
 		return nil
 	})
 	eg.Go(func() error { return processMotion(ctx, root, events, onEventStart, onEventEnd, webhook) })
@@ -915,6 +914,7 @@ func mainImpl() error {
 	w := flag.Int("w", 1280, "width")
 	h := flag.Int("h", 720, "height")
 	fps := flag.Int("fps", 15, "frame rate")
+	yavg := flag.Float64("yavg", 1., "Y average sensitivity, higher value means lower sensitivity")
 	d := flag.Duration("d", 0, "record for a specified duration (for testing)")
 	style := styleVar("normal")
 	flag.Var(&style, "style", "style to use")
@@ -974,7 +974,7 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	return run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr, *onEventStart, *onEventEnd, *webhook)
+	return run(ctx, *cam, style.String(), *d, *w, *h, *fps, *yavg, *mask, *root, *addr, *onEventStart, *onEventEnd, *webhook)
 }
 
 func main() {

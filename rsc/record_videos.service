@@ -1,6 +1,7 @@
 [Unit]
 Description=Record videos
 After=network.target
+StartLimitInterval=0
 
 [Service]
 Restart=always
