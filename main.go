@@ -733,7 +733,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	if mask != "" {
 		args = append(args, "-i", mask)
 	} else {
-		args = append(args, "-f", "lavfi", "-i", "color=color=white:size=100x100")
+		args = append(args, "-f", "lavfi", "-i", "color=color=white:size=32x32")
 	}
 	fg := constructFilterGraph(style, size)
 	hlsOut := "[out]"
@@ -901,54 +901,7 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	/*
-		tmp := ""
-		if *mask == "" {
-			// TODO:
-			if false {
-				*mask = "color=color=white:size=" + strconv.Itoa(*w) + "x" + strconv.Itoa(*h)
-			}
-			f, err := os.CreateTemp("", "record-video-mask*.png")
-			if err != nil {
-				return err
-			}
-			tmp = f.Name()
-			slog.Debug("mask", "path", tmp)
-			img := image.NewRGBA(image.Rect(0, 0, *w, *h))
-			white := color.RGBA{255, 255, 255, 255}
-			for x := 0; x < *w; x++ {
-				for y := 0; y < *h; y++ {
-					img.SetRGBA(x, y, white)
-				}
-			}
-			if false {
-				// Testing: use a partial mask.
-				black := color.RGBA{}
-				for x := 0; x < *w; x++ {
-					for y := 0; y < *h+(*w-*h)-x; y++ {
-						img.SetRGBA(x, y, black)
-					}
-				}
-			}
-			if err = png.Encode(f, img); err != nil {
-				_ = os.Remove(tmp)
-				return err
-			}
-			if err = f.Close(); err != nil {
-				_ = os.Remove(tmp)
-				return err
-			}
-			*mask = tmp
-		}
-	*/
 	err := run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr)
-	/*
-		if tmp != "" {
-			if err2 := os.Remove(tmp); err == nil {
-				err = err2
-			}
-		}
-	*/
 	return err
 }
 
