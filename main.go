@@ -14,13 +14,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"image"
-	"image/color"
-	"image/png"
 	"io"
+	"iter"
 	"log/slog"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"net/textproto"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -533,6 +533,7 @@ func processMotion(root string, ch <-chan motionEvent) error {
 	}
 }
 
+/*
 type writerLock struct {
 	ch chan struct{}
 	w  io.Writer
@@ -572,23 +573,117 @@ func (m *multiWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+*/
+
+// broadcastFrames broadcast MPJPEG frames to listeners.
+type broadcastFrames struct {
+	mu sync.Mutex
+	l  []chan []byte
+}
+
+// listen reads ffmpeg's mpjpeg mime stream, decodes it, then send it to
+// readers.
+func (b *broadcastFrames) listen(ctx context.Context, r io.Reader) {
+	mr := multipart.NewReader(r, "ffmpeg")
+	for i := 0; ctx.Err() == nil; i++ {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			return
+		}
+		if err != nil {
+			return
+		}
+		frame, err := io.ReadAll(p)
+		if err != nil {
+			return
+		}
+		slog.Debug("mjpeg", "i", i, "b", len(frame))
+		// Expected p.Header:
+		//	Content-type: image/jpeg
+		//	Content-length: 1234
+		b.mu.Lock()
+		l := make([]chan []byte, len(b.l))
+		copy(l, b.l)
+		b.mu.Unlock()
+		for _, x := range l {
+			select {
+			case x <- frame:
+			default:
+			}
+		}
+	}
+}
+
+func (b *broadcastFrames) relay(ctx context.Context) iter.Seq[[]byte] {
+	ch := make(chan []byte, 1)
+	b.mu.Lock()
+	b.l = append(b.l, ch)
+	b.mu.Unlock()
+	return func(yield func([]byte) bool) {
+		defer func() {
+			b.mu.Lock()
+			for i := range b.l {
+				if b.l[i] == ch {
+					copy(b.l[i:], b.l[i+1:])
+					b.l = b.l[:len(b.l)-1]
+					break
+				}
+			}
+			b.mu.Unlock()
+		}()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case frame := <-ch:
+				if !yield(frame) {
+					return
+				}
+			}
+		}
+	}
+}
 
 func startServer(ctx context.Context, addr string, r io.Reader) error {
 	m := http.ServeMux{}
-	mw := multiWriter{}
+	//mw := multiWriter{}
+	bf := &broadcastFrames{}
+	go bf.listen(ctx, r)
+
 	m.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/" {
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
+		slog.Info("http", "remote", req.RemoteAddr)
+		mw := multipart.NewWriter(w)
+		defer mw.Close()
 		h := w.Header()
-		h.Set("Content-Type", "multipart/x-mixed-replace;boundary=ffmpeg")
+		h.Set("Content-Type", "multipart/x-mixed-replace;boundary="+mw.Boundary())
+		//h.Set("Content-Type", "multipart/x-mixed-replace;boundary=FRAME")
 		h.Set("Connection", "close")
 		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 		h.Set("Pragma", "no-cache")
 		h.Set("Expires", "0")
-		slog.Info("http", "remote", req.RemoteAddr)
-		mw.enqueue(w)
+
+		/*
+			mw.enqueue(w)
+		*/
+		i := 0
+		for frame := range bf.relay(req.Context()) {
+			slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(frame))
+			fw, err := mw.CreatePart(textproto.MIMEHeader{
+				"Content-Type":   []string{"image/jpeg"},
+				"Content-Length": []string{strconv.Itoa(len(frame))},
+			})
+			if err != nil {
+				break
+			}
+			if _, err := fw.Write(frame); err != nil {
+				break
+			}
+			i++
+		}
 		slog.Info("http", "remote", req.RemoteAddr, "done", true)
 	})
 	s := http.Server{
@@ -604,7 +699,7 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 	}
 	slog.Info("serving", "addr", l.Addr())
 	go s.Serve(l)
-	go io.Copy(&mw, r)
+	//go io.Copy(&mw, r)
 	// TODO: clean shutdown.
 	//s.Shutdown(context.Background())
 	return nil
@@ -643,6 +738,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
+		// Adjust as needed:
 		"-loglevel", "error",
 		"-probesize", "32",
 		"-fpsprobesize", "0",
@@ -650,6 +746,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		"-avioflags", "direct",
 		"-fflags", "nobuffer",
 		"-flags", "low_delay",
+		"-thread_queue_size", "16",
 	}
 	switch runtime.GOOS {
 	case "darwin":
@@ -663,8 +760,12 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		"-video_size", size,
 		"-framerate", strconv.Itoa(fps),
 		"-i", cam,
-		"-i", mask,
 	)
+	if mask != "" {
+		args = append(args, "-i", mask)
+	} else {
+		args = append(args, "-f", "lavfi", "-i", "color=color=white:size=100x100")
+	}
 	fg := constructFilterGraph(style, size)
 	hlsOut := "[out]"
 	// MJPEG stream
@@ -679,7 +780,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 				sources: []string{"[out2]"},
 				// Cut down to 1 fps, with half resolution.
 				chain: buildChain("framestep="+strconv.Itoa(fps), scaleHalf),
-				sinks: []string{"[outMJPEG]"},
+				sinks: []string{"[outMPJPEG]"},
 			},
 		)
 		hlsOut = "[outHLS]"
@@ -708,15 +809,19 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		"all.m3u8",
 	)
 
-	// MJPEG stream
+	// MPJPEG stream
 	if addr != "" {
+		// MJPEG encapsulated in multi-part MIME demuxer.
+		// An option here would be to use ffmpeg's "-listen 1 http://0.0.0.0:port"
+		// but I failed to make it work. Instead decode and reencode. It's a bit
+		// wasteful but it should be fast enough.
 		if err = startServer(ctx, addr, mjpegR); err != nil {
 			return err
 		}
 		// https://ffmpeg.org/ffmpeg-all.html#pipe
 		args = append(args,
-			"-map", "[outMJPEG]",
-			"-f", "mjpeg",
+			"-map", "[outMPJPEG]",
+			"-f", "mpjpeg",
 			"-q", "2",
 			//"-qscale:v", "2",
 			"pipe:4",
@@ -827,50 +932,54 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	tmp := ""
-	if *mask == "" {
-		// TODO:
-		if false {
-			*mask = "color=color=white:size=" + strconv.Itoa(*w) + "x" + strconv.Itoa(*h)
-		}
-		f, err := os.CreateTemp("", "record-video-mask*.png")
-		if err != nil {
-			return err
-		}
-		tmp = f.Name()
-		slog.Debug("mask", "path", tmp)
-		img := image.NewRGBA(image.Rect(0, 0, *w, *h))
-		white := color.RGBA{255, 255, 255, 255}
-		for x := 0; x < *w; x++ {
-			for y := 0; y < *h; y++ {
-				img.SetRGBA(x, y, white)
+	/*
+		tmp := ""
+		if *mask == "" {
+			// TODO:
+			if false {
+				*mask = "color=color=white:size=" + strconv.Itoa(*w) + "x" + strconv.Itoa(*h)
 			}
-		}
-		if false {
-			// Testing: use a partial mask.
-			black := color.RGBA{}
+			f, err := os.CreateTemp("", "record-video-mask*.png")
+			if err != nil {
+				return err
+			}
+			tmp = f.Name()
+			slog.Debug("mask", "path", tmp)
+			img := image.NewRGBA(image.Rect(0, 0, *w, *h))
+			white := color.RGBA{255, 255, 255, 255}
 			for x := 0; x < *w; x++ {
-				for y := 0; y < *h+(*w-*h)-x; y++ {
-					img.SetRGBA(x, y, black)
+				for y := 0; y < *h; y++ {
+					img.SetRGBA(x, y, white)
 				}
 			}
+			if false {
+				// Testing: use a partial mask.
+				black := color.RGBA{}
+				for x := 0; x < *w; x++ {
+					for y := 0; y < *h+(*w-*h)-x; y++ {
+						img.SetRGBA(x, y, black)
+					}
+				}
+			}
+			if err = png.Encode(f, img); err != nil {
+				_ = os.Remove(tmp)
+				return err
+			}
+			if err = f.Close(); err != nil {
+				_ = os.Remove(tmp)
+				return err
+			}
+			*mask = tmp
 		}
-		if err = png.Encode(f, img); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-		if err = f.Close(); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-		*mask = tmp
-	}
+	*/
 	err := run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr)
-	if tmp != "" {
-		if err2 := os.Remove(tmp); err == nil {
-			err = err2
+	/*
+		if tmp != "" {
+			if err2 := os.Remove(tmp); err == nil {
+				err = err2
+			}
 		}
-	}
+	*/
 	return err
 }
 
