@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -506,7 +507,7 @@ func runCmd(ctx context.Context, a string) error {
 }
 
 // processMotion reacts to motion start and stop events.
-func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEventStart, onEventEnd string) error {
+func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEventStart, onEventEnd, webhook string) error {
 	// libx264 can buffer 30s at a time.
 	const lookBack = 31 * time.Second
 	const reprocess = time.Minute
@@ -559,6 +560,16 @@ func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEv
 					if err := runCmd(ctx, onEventEnd); err != nil {
 						slog.Error("on_event_end", "p", onEventEnd, "err", err)
 					}
+				}
+			}
+			if webhook != "" {
+				d, _ := json.Marshal(map[string]bool{"motion": event.start})
+				slog.Info("webhook", "url", webhook, "motion", event.start)
+				resp, err := http.Post(webhook, "application/json", bytes.NewReader(d))
+				if err != nil {
+					slog.Error("webhook", "url", webhook, "motion", event.start, "err", err)
+				} else {
+					resp.Body.Close()
 				}
 			}
 		}
@@ -694,7 +705,7 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 	return nil
 }
 
-func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, mask, root, addr, onEventStart, onEventEnd string) error {
+func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, mask, root, addr, onEventStart, onEventEnd, webhook string) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -863,7 +874,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		filterMotion(ctx, start, ch, events)
 		return nil
 	})
-	eg.Go(func() error { return processMotion(ctx, root, events, onEventStart, onEventEnd) })
+	eg.Go(func() error { return processMotion(ctx, root, events, onEventStart, onEventEnd, webhook) })
 	err = cmd.Wait()
 	if err2 := eg.Wait(); err == nil {
 		err = err2
@@ -909,8 +920,9 @@ func mainImpl() error {
 	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
 	root := flag.String("root", getWd(), "root directory to store videos into")
 	addr := flag.String("addr", "", "optional address to listen to to serve MJPEG")
-	onEventStart := flag.String("on-event-start", "", "script to run on event start")
-	onEventEnd := flag.String("on-event-end", "", "script to run on event start")
+	onEventStart := flag.String("on-event-start", "", "script to run on motion event start")
+	onEventEnd := flag.String("on-event-end", "", "script to run on motion event start")
+	webhook := flag.String("webhook", "", "webhook to call on motion events")
 	verbose := flag.Bool("v", false, "enable verbosity")
 	flag.Parse()
 
@@ -961,7 +973,7 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	return run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr, *onEventStart, *onEventEnd)
+	return run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr, *onEventStart, *onEventEnd, *webhook)
 }
 
 func main() {

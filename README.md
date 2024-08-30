@@ -123,33 +123,7 @@ https://home-assistant.io/integrations/mjpeg/ and specify
 
 #### Motion detection
 
-**1**: Create two scripts and make them as executable with `chmod +x`. Replace
-`homeassistant.local` with its IP address.
-
-`on_event_start.sh`:
-
-```
-#!/bin/bash
-set -eu
-echo "Event detected"
-curl -X POST -sS -H "Content-Type: application/json" \
-  -d '{"motion":true}' \
-  http://homeassistant.local:8123/api/webhook/my_motion_detector_INSERT_RANDOM_STRING
-```
-
-`on_event_end.sh`:
-
-```
-#!/bin/bash
-set -eu
-echo "Event detected"
-curl -X POST -sS -H "Content-Type: application/json" \
-  -d '{"motion":false}' \
-  http://homeassistant.local:8123/api/webhook/my_motion_detector_INSERT_RANDOM_STRING
-```
-
-
-**2**: Add the following to your Home Assistant `configuration.yaml` then
+**1**: Add the following to your Home Assistant `configuration.yaml` then
 restart Home Assistant.
 
 ```
@@ -166,10 +140,9 @@ template:
         device_class: motion
 ```
 
-**3**: Start `record-videos` with the argument:
-`-on-event-start scripts/on_event_start.sh -on-event-end scripts/on_event_end.sh`
+**2**: Start `record-videos` with the argument:
+  `-webhook http://homeassistant.local:8123/api/webhook/my_motion_detector_INSERT_RANDOM_STRING`
 
-
-**4**: Add the camera and motion detection signal to Home Assistant's
+**3**: Add the camera and motion detection signal to Home Assistant's
 [UI](https://home-assistant.io/dashboards/)
 and/or create an [automation](https://home-assistant.io/docs/automation/).
