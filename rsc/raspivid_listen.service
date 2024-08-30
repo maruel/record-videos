@@ -1,0 +1,11 @@
+[Unit]
+Description=Listens on TCP port 8081, stream H264 the client connecting to it.
+After=network.target
+
+[Service]
+Restart=always
+RestartSec=1s
+ExecStart=/usr/bin/raspivid -w 1280 -h 720 -fps 15 --codec H264 --profile high --qp 30 --bitrate 0 --spstimings --timeout 0 --listen --output tcp://0.0.0.0:8081
+
+[Install]
+WantedBy=default.target

@@ -726,38 +726,46 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
-		"-probesize", "32",
-		"-fpsprobesize", "0",
-		"-analyzeduration", "0",
-		"-avioflags", "direct",
-		"-fflags", "nobuffer",
-		"-flags", "low_delay",
-		"-thread_queue_size", "16",
 		// Disable stats output because it uses CR character, which corrupts logs.
 		"-nostats",
+		// Enable automatic hardware acceleration for encoding. This can fail in
+		// weird ways, like trying to load CUDA when there's no nvidia hardware
+		// present.
+		//"-hwaccel", "auto",
 	}
 	if slog.Default().Enabled(ctx, slog.LevelDebug) {
 		args = append(args, "-loglevel", "repeat+info")
 	} else {
 		args = append(args, "-loglevel", "repeat+warning")
 	}
-	switch runtime.GOOS {
-	case "darwin":
-		args = append(args, "-f", "avfoundation")
-	case "linux":
-		args = append(args, "-f", "v4l2")
-	default:
-		return errors.New("not implemented for this OS")
+	if strings.HasPrefix(cam, "tcp://") {
+		args = append(args, "-f", "h264")
+	} else {
+		switch runtime.GOOS {
+		case "darwin":
+			args = append(args, "-f", "avfoundation")
+		case "linux":
+			args = append(args, "-f", "v4l2")
+		default:
+			return errors.New("not implemented for this OS")
+		}
+		args = append(args,
+			"-avioflags", "direct",
+			"-fflags", "nobuffer",
+			"-flags", "low_delay",
+			"-probesize", "32",
+			"-fpsprobesize", "0",
+			"-analyzeduration", "0",
+			"-video_size", size)
 	}
 	args = append(args,
-		"-video_size", size,
 		// Warning: the camera driver may decide another framerate. Sadly this fact
 		// is output by ffmpeg at info level, not warning level. Use the "-v" flag
 		// to see it. It looks like:
 		//	[video4linux2,v4l2 @ 0x63b48c816180] The driver changed the time per frame from 1/15 to 1/10
 		"-framerate", strconv.Itoa(fps),
-		"-i", cam,
 	)
+	args = append(args, "-i", cam)
 	if mask != "" {
 		args = append(args, "-i", mask)
 	} else {
@@ -794,7 +802,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	// HLS in h264:
 	args = append(args,
 		"-map", hlsOut,
-		"-c:v", "libx264",
+		"-c:v", "h264",
 		"-preset", "fast",
 		"-crf", "30",
 		"-f", "hls",
