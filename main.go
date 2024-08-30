@@ -669,8 +669,9 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 	bf := &broadcastFrames{}
 	go bf.listen(ctx, r)
 
-	m.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/" {
+	m.HandleFunc("GET /mjpeg", func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/mjpeg" {
+			slog.Error("http", "path", req.URL.Path)
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
@@ -701,6 +702,10 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 			i++
 		}
 		slog.Info("http", "remote", req.RemoteAddr, "done", true, "d", time.Since(start).Round(100*time.Millisecond))
+	})
+	m.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
+		slog.Error("http", "path", req.URL.Path)
+		http.Error(w, "Not found", http.StatusNotFound)
 	})
 	s := http.Server{
 		Handler:      &m,
