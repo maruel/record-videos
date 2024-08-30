@@ -130,7 +130,12 @@ var motionEdgeDetect = chain{
 // printYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
 //
 // Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
-const printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:function=greater:value=0.1:file='pipe\\:3':direct=1"
+const printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:file='pipe\\:3':direct=1"
+
+// printFilteredYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
+//
+// Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
+const printFilteredYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:function=greater:value=0.1:file='pipe\\:3':direct=1"
 
 // stream is a stream that takes an input, passes it through a chain of filters
 // and sink into the output.
@@ -407,7 +412,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- motionLevel) error 
 }
 
 // filterMotion converts raw Y data into motion detection events.
-func filterMotion(ctx context.Context, start time.Time, yavg float64, ch <-chan motionLevel, events chan<- motionEvent) {
+func filterMotion(ctx context.Context, start time.Time, yavg float64, ch <-chan motionLevel, events chan<- motionEvent) error {
 	// Eventually configuration values:
 	const motionExpiration = 5 * time.Second
 	// TODO: Get the ready signal from MPJPEG reader.
@@ -416,27 +421,37 @@ func filterMotion(ctx context.Context, start time.Time, yavg float64, ch <-chan 
 	const ignoreFirstFrames = 10
 	const ignoreFirstMoments = 5 * time.Second
 	done := ctx.Done()
-	var after <-chan time.Time
+	var motionTimeout <-chan time.Time
 	inMotion := false
 	for {
 		select {
 		case <-done:
-			return
+			return nil
 		case l, ok := <-ch:
 			if !ok {
-				return
+				return nil
 			}
-			slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "f", l.frame, "yavg", l.yavg)
+			// Since we do not use printFilteredYAVGtoPipe anymore so we can use the
+			// motion level output as a keep-alive, we need to filter out logs.
+			if l.yavg > 0.1 {
+				slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "f", l.frame, "yavg", l.yavg)
+			}
 			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstMoments && l.yavg >= yavg {
-				after = time.After(motionExpiration - time.Since(l.t))
+				motionTimeout = time.After(motionExpiration - time.Since(l.t))
 				if !inMotion {
 					inMotion = true
 					events <- motionEvent{t: l.t, start: true}
 				}
 			}
-		case t := <-after:
+		case t := <-motionTimeout:
 			events <- motionEvent{t: t.Round(100 * time.Millisecond), start: false}
 			inMotion = false
+
+		case <-time.After(10 * time.Second):
+			// It's dead jim. It can happen when the USB port hangs, or if the remote
+			// TCP died. It's easier to just quit, and have systemd restart the
+			// process.
+			return errors.New("no events for more than 10s")
 		}
 	}
 }
@@ -851,6 +866,8 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	events := make(chan motionEvent, 10)
 	eg, ctx := errgroup.WithContext(ctx)
 	slog.Debug("running", "cmd", args)
+	// If any of the eg.Go() call below returns an error, this will kill ffmpeg
+	// via ctx.
 	// #nosec G204
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = root
@@ -871,10 +888,11 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	})
 	eg.Go(func() error {
 		defer close(events)
-		filterMotion(ctx, start, yavg, ch, events)
-		return nil
+		return filterMotion(ctx, start, yavg, ch, events)
 	})
-	eg.Go(func() error { return processMotion(ctx, root, events, onEventStart, onEventEnd, webhook) })
+	eg.Go(func() error {
+		return processMotion(ctx, root, events, onEventStart, onEventEnd, webhook)
+	})
 	err = cmd.Wait()
 	if err2 := eg.Wait(); err == nil {
 		err = err2
