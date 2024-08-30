@@ -3,6 +3,7 @@ module github.com/maruel/record-videos
 go 1.23.0
 
 require (
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/lmittmann/tint v1.0.5
 	github.com/mattn/go-colorable v0.1.13
 	github.com/mattn/go-isatty v0.0.20

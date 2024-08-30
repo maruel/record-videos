@@ -33,6 +33,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
@@ -912,8 +913,6 @@ func mainImpl() error {
 	onEventEnd := flag.String("on-event-end", "", "script to run on event start")
 	verbose := flag.Bool("v", false, "enable verbosity")
 	flag.Parse()
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer cancel()
 
 	if flag.NArg() != 0 {
 		return errors.New("unexpected argument")
@@ -921,6 +920,29 @@ func mainImpl() error {
 	if *verbose {
 		level.Set(slog.LevelDebug)
 	}
+
+	// Quit whenever SIGINT is received.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	// Quit whenever the executable is modified.
+	e, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	wat, err := fsnotify.NewWatcher()
+	if err != nil {
+		return err
+	}
+	defer wat.Close()
+	if err := wat.Add(e); err != nil {
+		return err
+	}
+	go func() {
+		<-wat.Events
+		cancel()
+	}()
+
 	if *cam == "" {
 		var out []byte
 		var err error
@@ -939,8 +961,7 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	err := run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr, *onEventStart, *onEventEnd)
-	return err
+	return run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr, *onEventStart, *onEventEnd)
 }
 
 func main() {
