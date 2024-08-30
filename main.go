@@ -781,6 +781,10 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 	})
 
 	m.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/" {
+			http.Redirect(w, req, "videos", http.StatusFound)
+			return
+		}
 		slog.Error("http", "path", req.URL.Path)
 		http.Error(w, "Not found", http.StatusNotFound)
 	})
@@ -1048,7 +1052,7 @@ func mainImpl() error {
 		return err
 	}
 	defer wat.Close()
-	if err := wat.Add(e); err != nil {
+	if err = wat.Add(e); err != nil {
 		return err
 	}
 	go func() {
