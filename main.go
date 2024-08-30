@@ -565,11 +565,12 @@ func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEv
 			if webhook != "" {
 				d, _ := json.Marshal(map[string]bool{"motion": event.start})
 				slog.Info("webhook", "url", webhook, "motion", event.start)
+				// #nosec G107
 				resp, err := http.Post(webhook, "application/json", bytes.NewReader(d))
 				if err != nil {
 					slog.Error("webhook", "url", webhook, "motion", event.start, "err", err)
 				} else {
-					resp.Body.Close()
+					_ = resp.Body.Close()
 				}
 			}
 		}
