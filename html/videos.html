@@ -23,7 +23,7 @@ function add(i, file) {
   // TODO: onended doesn't seem to work, we want to revert to 1x when the video
   // reaches realtime.
   d.innerHTML = '' +
-    '<a href="raw/' + escape(file) + '" target=_blank>' + file + '</a>' +
+    '<a href="raw/' + escape(file) + '" target=_blank>' + file + '</a><br>' +
     '<video id="vid' + i + '" controls preload="none" ' +
     'onloadstart="this.playbackRate=2;" ' +
     'onended="this.playbackRate=1;" ' +
