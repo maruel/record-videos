@@ -1,0 +1,30 @@
+<!DOCTYPE HTML>
+<!-- Copyright 2024 Marc-Antoine Ruel; https://github.com/maruel/record-videos -->
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<div><ul id=parent></ul></div>
+<script>
+"use strict";
+const ESC = {'<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;'}
+function escapeChar(a) { return ESC[a] || a; }
+function escape(s) { return s.replace(/[<>"&]/g, escapeChar); }
+
+let parent = document.getElementById("parent");
+
+function add(i, file) {
+  let d = document.createElement("li");
+  d.id = "d" + i;
+  d.innerHTML = '<a href="raw/' + escape(file) + '" target="_blank" rel="noopener noreferrer">' + escape(file) + '</a>';
+  parent.appendChild(d);
+}
+
+function addall(files) {
+  for (let i in files) {
+    add(i, files[i]);
+  }
+}
+
+// A global "data" must be defined by injecting data as a script down below.
+document.addEventListener('DOMContentLoaded', ()=> {
+  addall(data.files);
+});
+</script>

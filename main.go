@@ -11,11 +11,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"html/template"
 	"io"
+	"io/fs"
 	"iter"
 	"log/slog"
 	"math"
@@ -23,15 +26,16 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"text/template"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -41,10 +45,14 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-func getWd() string {
-	wd, _ := os.Getwd()
-	return wd
-}
+//go:embed html/root.html
+var rootHTML []byte
+
+//go:embed html/list.html
+var listHTML []byte
+
+// Injected data to speed up page load, versus having to do an API call.
+var dataTmpl = template.Must(template.New("").Parse("<script>'use strict';const data = {{.}};</script>"))
 
 // filter is a filter supported by libavfilter.
 //
@@ -135,6 +143,8 @@ const printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:file='
 // printFilteredYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
 //
 // Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
+//
+//lint:ignore U1000 not used because of keep-alive
 const printFilteredYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:function=greater:value=0.1:file='pipe\\:3':direct=1"
 
 // stream is a stream that takes an input, passes it through a chain of filters
@@ -664,17 +674,13 @@ func (b *broadcastFrames) relay(ctx context.Context) iter.Seq[[]byte] {
 	}
 }
 
-func startServer(ctx context.Context, addr string, r io.Reader) error {
+func startServer(ctx context.Context, addr string, r io.Reader, root string) error {
 	m := http.ServeMux{}
 	bf := &broadcastFrames{}
 	go bf.listen(ctx, r)
 
+	// MJPEG stream
 	m.HandleFunc("GET /mjpeg", func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/mjpeg" {
-			slog.Error("http", "path", req.URL.Path)
-			http.Error(w, "Not found", http.StatusNotFound)
-			return
-		}
 		start := time.Now()
 		slog.Info("http", "remote", req.RemoteAddr)
 		mw := multipart.NewWriter(w)
@@ -703,6 +709,77 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 		}
 		slog.Info("http", "remote", req.RemoteAddr, "done", true, "d", time.Since(start).Round(100*time.Millisecond))
 	})
+
+	// Video serving.
+	m.HandleFunc("GET /raw/", func(w http.ResponseWriter, req *http.Request) {
+		path, err2 := url.QueryUnescape(req.URL.Path)
+		if err2 != nil {
+			slog.Error("http", "path", req.URL.Path)
+			http.Error(w, "Invalid path", 404)
+			return
+		}
+		f := path[len("/raw/"):]
+		// Limit to not path, only .m3u8 and .ts.
+		if strings.Contains(f, "/") || strings.Contains(f, "\\") || strings.Contains(f, "..") || (!strings.HasSuffix(f, ".m3u8") && !strings.HasSuffix(f, ".ts")) {
+			slog.Error("http", "path", req.URL.Path)
+			http.Error(w, "Invalid path", 404)
+			return
+		}
+
+		// Cache for a long time, the exception is m3u8 since it could be a live
+		// playlist.
+		if h := w.Header(); strings.HasSuffix(f, ".m3u8") {
+			h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+			h.Set("Pragma", "no-cache")
+			h.Set("Expires", "0")
+		} else {
+			h.Set("Cache-Control", "public, max-age=86400")
+		}
+		http.ServeFile(w, req, filepath.Join(root, f))
+	})
+
+	// HTML
+	m.HandleFunc("GET /list", func(w http.ResponseWriter, req *http.Request) {
+		var files []string
+		offset := len(root) + 1
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if !d.IsDir() && strings.HasSuffix(path, ".m3u8") || strings.HasSuffix(path, ".ts") {
+				files = append(files, path[offset:])
+			}
+			return nil
+		})
+		sort.Strings(files)
+		h := w.Header()
+		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		h.Set("Pragma", "no-cache")
+		h.Set("Expires", "0")
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		if _, err2 := w.Write(listHTML); err2 != nil {
+			return
+		}
+		_ = dataTmpl.Execute(w, map[string]any{"files": files})
+	})
+	m.HandleFunc("GET /videos", func(w http.ResponseWriter, req *http.Request) {
+		var files []string
+		offset := len(root) + 1
+		_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+			if !d.IsDir() && strings.HasSuffix(path, ".m3u8") {
+				files = append(files, path[offset:])
+			}
+			return nil
+		})
+		sort.Strings(files)
+		h := w.Header()
+		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		h.Set("Pragma", "no-cache")
+		h.Set("Expires", "0")
+		h.Set("Content-Type", "text/html; charset=utf-8")
+		if _, err2 := w.Write(rootHTML); err2 != nil {
+			return
+		}
+		_ = dataTmpl.Execute(w, map[string]any{"files": files})
+	})
+
 	m.HandleFunc("GET /", func(w http.ResponseWriter, req *http.Request) {
 		slog.Error("http", "path", req.URL.Path)
 		http.Error(w, "Not found", http.StatusNotFound)
@@ -852,7 +929,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		// An option here would be to use ffmpeg's "-listen 1 http://0.0.0.0:port"
 		// but I failed to make it work. Instead decode and reencode. It's a bit
 		// wasteful but it should be fast enough.
-		if err = startServer(ctx, addr, mjpegR); err != nil {
+		if err = startServer(ctx, addr, mjpegR, root); err != nil {
 			return err
 		}
 		// https://ffmpeg.org/ffmpeg-all.html#pipe
@@ -942,7 +1019,7 @@ func mainImpl() error {
 	style := styleVar("normal")
 	flag.Var(&style, "style", "style to use")
 	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
-	root := flag.String("root", getWd(), "root directory to store videos into")
+	root := flag.String("root", ".", "root directory to store videos into")
 	addr := flag.String("addr", "", "optional address to listen to to serve MJPEG")
 	onEventStart := flag.String("on-event-start", "", "script to run on motion event start")
 	onEventEnd := flag.String("on-event-end", "", "script to run on motion event start")
@@ -979,6 +1056,14 @@ func mainImpl() error {
 		cancel()
 	}()
 
+	if *root, err = filepath.Abs(filepath.Clean(*root)); err != nil {
+		return err
+	}
+	if fi, err := os.Stat(*root); err != nil {
+		return fmt.Errorf("-root %q is unusable: %w", *root, err)
+	} else if !fi.IsDir() {
+		return fmt.Errorf("-root %q is not a directory", *root)
+	}
 	if *cam == "" {
 		var out []byte
 		var err error

@@ -1,0 +1,89 @@
+<!DOCTYPE HTML>
+<!-- Copyright 2024 Marc-Antoine Ruel; https://github.com/maruel/record-videos -->
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+video {
+  width: 100%;
+  max-width: 1280px;
+}
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/hls.js/1.5.15/hls.min.js" defer></script>
+<div id=players></div>
+<script>
+"use strict";
+const ESC = {'<': '&lt;', '>': '&gt;', '"': '&quot;', '&': '&amp;'}
+function escapeChar(a) { return ESC[a] || a; }
+function escape(s) { return s.replace(/[<>"&]/g, escapeChar); }
+
+let parent = document.getElementById("players");
+
+function add(i, file) {
+  let d = document.createElement("div");
+  d.id = "d" + i;
+  d.innerHTML = '' +
+    '<a href="raw/' + escape(file) + '" target=_blank>' + file + '</a>' +
+    '<video id="vid' + i + '" controls preload="none" ' +
+    'onloadstart="this.playbackRate=2;" ' +
+    'controlslist="nodownload noremoteplayback" ' +
+    'disablepictureinpicture disableremoteplayback ' +
+    'muted><source src="raw/' + escape(file) + '" /></video>';
+  if (file.endsWith(".m3u8")) {
+    if (Hls.isSupported()) {
+      let video = d.getElementsByTagName('video')[0];
+      let hls = new Hls();
+      hls.loadSource("raw/" + file);
+      hls.attachMedia(video);
+    } else {
+      console.log("welp for " + file);
+      return null;
+    }
+  }
+  parent.insertAdjacentElement("afterbegin", d);
+  // In order: parent.appendChild(d);
+  return document.getElementById("vid" + i);
+}
+
+function addall(files) {
+  const observer = new IntersectionObserver((entries, observer) => {
+    entries.forEach(entry => {
+      let target = entry.target;
+      if (entry.isIntersecting) {
+        if (target.paused) {
+          //console.log('Element ' + target.id + ' is now visible in the viewport: starting');
+          // Only auto-start after being visible for 1s, to reduce
+          // strain on the server when scrolling fast.
+          target.playTimeout = setTimeout(() => {
+            target.play();
+            target.playTimeout = null;
+          }, 1000);
+        }
+      } else {
+        if (target.playTimeout) {
+          clearTimeout(target.playTimeout);
+          target.playTimeout = null;
+        }
+        if (!target.paused) {
+          //console.log('Element ' + target.id + ' is not visible in the viewport anymore: pausing');
+          // This may fire warnings in the dev console because pause()
+          // is called before the play() promise is executed. We
+          // don't care.
+          target.pause();
+        }
+      }
+    });
+  });
+  for (let i in files) {
+    if (!files[i].endsWith(".ts")) {
+      let child = add(i, files[i]);
+      if (child) {
+        observer.observe(child);
+      }
+    }
+  }
+}
+
+// A global "data" must be defined by injecting data as a script down below.
+document.addEventListener('DOMContentLoaded', ()=> {
+  addall(data.files);
+});
+</script>
