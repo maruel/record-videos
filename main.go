@@ -493,8 +493,19 @@ func generateM3U8(root string, t, start, end time.Time) error {
 	return os.Rename(name+".tmp", name)
 }
 
+// runCmd runs a command and give it at most 1 minute to run.
+func runCmd(ctx context.Context, a string) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	c := exec.CommandContext(ctx, a)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	slog.Info("cmd", "p", a)
+	return c.Run()
+}
+
 // processMotion reacts to motion start and stop events.
-func processMotion(root string, ch <-chan motionEvent) error {
+func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEventStart, onEventEnd string) error {
 	// libx264 can buffer 30s at a time.
 	const lookBack = 31 * time.Second
 	const reprocess = time.Minute
@@ -522,8 +533,6 @@ func processMotion(root string, ch <-chan motionEvent) error {
 				}
 				return nil
 			}
-			// TODO: Send event to Home Assistant.
-
 			slog.Info("motionEvent", "t", event.t.Format("2006-01-02T15:04:05.00"), "start", event.start)
 			if event.start {
 				// Create a simple m3u8 file. Will be populated later.
@@ -537,6 +546,19 @@ func processMotion(root string, ch <-chan motionEvent) error {
 			if !event.start {
 				toProcess = append(toProcess, [...]time.Time{event.t, start, end})
 				after = time.After(reprocess)
+			}
+			if event.start {
+				if onEventStart != "" {
+					if err := runCmd(ctx, onEventStart); err != nil {
+						slog.Error("on_event_start", "p", onEventStart, "err", err)
+					}
+				}
+			} else {
+				if onEventEnd != "" {
+					if err := runCmd(ctx, onEventEnd); err != nil {
+						slog.Error("on_event_end", "p", onEventEnd, "err", err)
+					}
+				}
 			}
 		}
 	}
@@ -671,7 +693,7 @@ func startServer(ctx context.Context, addr string, r io.Reader) error {
 	return nil
 }
 
-func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, mask, root, addr string) error {
+func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, mask, root, addr, onEventStart, onEventEnd string) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -832,7 +854,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		filterMotion(ctx, start, ch, events)
 		return nil
 	})
-	eg.Go(func() error { return processMotion(root, events) })
+	eg.Go(func() error { return processMotion(ctx, root, events, onEventStart, onEventEnd) })
 	err = cmd.Wait()
 	if err2 := eg.Wait(); err == nil {
 		err = err2
@@ -878,6 +900,8 @@ func mainImpl() error {
 	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
 	root := flag.String("root", getWd(), "root directory to store videos into")
 	addr := flag.String("addr", "", "optional address to listen to to serve MJPEG")
+	onEventStart := flag.String("on-event-start", "", "script to run on event start")
+	onEventEnd := flag.String("on-event-end", "", "script to run on event start")
 	verbose := flag.Bool("v", false, "enable verbosity")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -907,7 +931,7 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	err := run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr)
+	err := run(ctx, *cam, style.String(), *d, *w, *h, *fps, *mask, *root, *addr, *onEventStart, *onEventEnd)
 	return err
 }
 
