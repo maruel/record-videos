@@ -1,13 +1,17 @@
-# Records movements from a camera as videos to disk
+# record-videos
+
+- Streams video over MJPEG
+- Detects motion
+- Save recording to disk
+- Integrates with [Home Assistant](#integration-with-home-assistant)
 
 To be used along with https://github.com/maruel/serve-videos.
 
 
 ## Installation
 
-First, install [FFmpeg](https://ffmpeg.org/download.html) and [Go](https://go.dev/dl).
-
-Then install `record-videos`:
+1. Install prerequisites [FFmpeg](https://ffmpeg.org/download.html) and [Go](https://go.dev/dl).
+2. Install `record-videos`:
 
     go install github.com/maruel/record-videos@latest
 
@@ -23,16 +27,14 @@ Help with the command line arguments available:
 
 The command will look like:
 
-    record-videos -camera "FaceTime HD Camera" \
-      -fps 30 -root out
+    record-videos -camera "FaceTime HD Camera" -fps 30 -root out
 
 
 ### linux
 
 The command will look like:
 
-    record-videos -camera /dev/video0 \
-      -w 960 -h 720 --root out
+    record-videos -camera /dev/video0 -w 960 -h 720 --root out
 
 
 ### Advanced

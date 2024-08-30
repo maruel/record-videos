@@ -413,7 +413,7 @@ func filterMotion(ctx context.Context, start time.Time, ch <-chan motionLevel, e
 	// Many cameras will auto-focus and cause a lot of artificial motion when
 	// starting up.
 	const ignoreFirstFrames = 10
-	const ignoreFirstSeconds = 5 * time.Second
+	const ignoreFirstMoments = 5 * time.Second
 	done := ctx.Done()
 	var after <-chan time.Time
 	inMotion := false
@@ -426,7 +426,7 @@ func filterMotion(ctx context.Context, start time.Time, ch <-chan motionLevel, e
 				return
 			}
 			slog.Info("motionLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "f", l.frame, "yavg", l.yavg)
-			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstSeconds && l.yavg >= ythreshold {
+			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstMoments && l.yavg >= ythreshold {
 				after = time.After(motionExpiration - time.Since(l.t))
 				if !inMotion {
 					inMotion = true
