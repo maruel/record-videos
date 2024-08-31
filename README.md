@@ -121,7 +121,11 @@ machine as described above.
 
 ### Integration with Home Assistant
 
+![Home Assistant](https://github.com/user-attachments/assets/9bc01eb9-d78b-49a5-98e7-779fd1c1496c)
+
 record-videos integrates with [Home Assistant](https://home-assistant.io/)!
+
+![Home Assistant Dashboard](https://github.com/user-attachments/assets/a1c65608-d96f-4b74-b0e5-af992026b822)
 
 
 #### MJPEG camera
@@ -157,9 +161,7 @@ template:
 [UI](https://home-assistant.io/dashboards/)
 and/or create an [automation](https://home-assistant.io/docs/automation/).
 
-![Home Assistant Dashboard](https://github.com/user-attachments/assets/a1c65608-d96f-4b74-b0e5-af992026b822)
-
-The two entities that created this:
+The two entities that created the screen shot above:
 
 1) Camera:
 ```
