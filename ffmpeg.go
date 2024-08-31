@@ -461,6 +461,8 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, c
 		"-preset", "fast",
 		"-crf", "30",
 		"-f", "hls",
+		"-metadata", "service_provider='https://github.com/maruel/record-videos'",
+		"-metadata", "service_name='ffmpeg'",
 		"-hls_list_size", "0",
 		"-strftime", "1",
 		"-hls_allow_cache", "1",
@@ -490,6 +492,7 @@ func cmdFFMPEG(ctx context.Context, root string, args []string, handles []*os.Fi
 	slog.Debug("exec", "args", args)
 	// #nosec G204
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd.Dir = root
 	// stdin is intentionally not connected.
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

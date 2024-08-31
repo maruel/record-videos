@@ -45,15 +45,15 @@ sudo apt install ffmpeg
 mkdir -p $HOME/.config/systemd/user
 # Enables user's services to start at boot without explicitly logging in.
 loginctl enable-linger
-git clone https://github.com/maruel/record_videos
-cp record_videos/rsc/record_videos.service $HOME/.config/systemd/user
+git clone https://github.com/maruel/record-videos
+cp record-videos/rsc/record-videos.service $HOME/.config/systemd/user
 # Confirm the flags are what you want:
-nano $HOME/.config/systemd/user/record_videos.service
+nano $HOME/.config/systemd/user/record-videos.service
 systemctl --user daemon-reload
-systemctl --user enable record_videos
-systemctl --user restart record_videos
+systemctl --user enable record-videos
+systemctl --user restart record-videos
 # Confirm that it works:
-journalctl --user -f -u record_videos
+journalctl --user -f -u record-videos
 ```
 
 
