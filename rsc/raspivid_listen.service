@@ -1,6 +1,6 @@
 [Unit]
 Description=Listens on TCP port 8081, stream H264 the client connecting to it.
-After=network.target
+After=network-online.target
 StartLimitInterval=0
 
 [Service]

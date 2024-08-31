@@ -43,6 +43,8 @@ Install as a systemd service:
 ```
 sudo apt install ffmpeg
 mkdir -p $HOME/.config/systemd/user
+# Enables user's services to start at boot without explicitly logging in.
+loginctl enable-linger
 git clone https://github.com/maruel/record_videos
 cp record_videos/rsc/record_videos.service $HOME/.config/systemd/user
 # Confirm the flags are what you want:
@@ -70,7 +72,7 @@ for it.
 ```
 ssh raspberrypi.local "mkdir -p .config/systemd/user"
 scp rsc/raspivid_listen.service raspberrypi.local:.config/systemd/user
-ssh raspberrypi.local "systemctl --user daemon-reload && systemctl --user enable raspivid_listen && systemctl --user restart raspivid_listen"
+ssh raspberrypi.local "loginctl enable-linger && systemctl --user daemon-reload && systemctl --user enable raspivid_listen && systemctl --user restart raspivid_listen"
 # Confirm it started correctly:
 ssh raspberrypi.local "journalctl --user -f -u raspivid_listen"
 ```
