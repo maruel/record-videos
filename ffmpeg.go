@@ -383,6 +383,8 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, m
 			args = append(args, "-f", "avfoundation")
 		case "linux":
 			args = append(args, "-f", "v4l2")
+		case "windows":
+			args = append(args, "-f", "dshow")
 		default:
 			return nil, errors.New("not implemented for this OS")
 		}

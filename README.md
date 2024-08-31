@@ -32,7 +32,7 @@ record-videos -help
 The command will look like:
 
 ```
-record-videos -camera "FaceTime HD Camera" -fps 30 -root out
+record-videos -src "FaceTime HD Camera" -fps 30 -root out
 ```
 
 
@@ -80,7 +80,7 @@ ssh raspberrypi.local "journalctl --user -f -u raspivid_listen"
 Then run locally:
 
 ```
-record-videos -camera tcp://raspiberrypi.local:8081 -w 1280 -h 720
+record-videos -src tcp://raspiberrypi.local:8081 -w 1280 -h 720
 ```
 
 
@@ -109,6 +109,10 @@ machine as described above.
 - Try `-style motion` or `-style both` to visualize the underlying data.
 - Try `-mask` to only do motion detection on a subset of the frame, e.g. ignore
   the street in frame.
+- `-src` can be a local camera like `FaceTime HD Camera` on macOS, `/dev/video0`
+  on linux, `tcp://192.168.1.2:8081` to connect to a Raspberry Pi running
+  raspivid but it can be the current desktop! See
+  https://trac.ffmpeg.org/wiki/Capture/Desktop to learn how to. **untested**
 
 
 ### Integration with Home Assistant

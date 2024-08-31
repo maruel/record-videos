@@ -128,7 +128,7 @@ func mainImpl() error {
 		NoColor:    !isatty.IsTerminal(os.Stderr.Fd()),
 	}))
 	slog.SetDefault(logger)
-	cam := flag.String("camera", "", "camera to use")
+	src := flag.String("src", "", "source to use: either a local device or a remote port, see README.md for more information")
 	w := flag.Int("w", 1280, "width")
 	h := flag.Int("h", 720, "height")
 	fps := flag.Int("fps", 15, "frame rate")
@@ -182,7 +182,7 @@ func mainImpl() error {
 	} else if !fi.IsDir() {
 		return fmt.Errorf("-root %q is not a directory", *root)
 	}
-	if *cam == "" {
+	if *src == "" {
 		var out []byte
 		var err error
 		switch runtime.GOOS {
@@ -195,12 +195,15 @@ func mainImpl() error {
 				return fmt.Errorf("fail to run v4l2-ctl, try 'sudo apt install v4l-utils'? %w", err)
 			}
 			// TODO gather resolutions too: v4l2-ctl --list-formats-ext -d (dev)
+		case "windows":
+			c := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "")
+			out, _ = c.CombinedOutput()
 		default:
-			return fmt.Errorf("-camera not specified")
+			return fmt.Errorf("-src not specified")
 		}
-		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
+		return fmt.Errorf("-src not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	return run(ctx, *cam, s, *d, *w, *h, *fps, *yavg, *mask, *root, *addr, *onEventStart, *onEventEnd, *webhook)
+	return run(ctx, *src, s, *d, *w, *h, *fps, *yavg, *mask, *root, *addr, *onEventStart, *onEventEnd, *webhook)
 }
 
 func main() {

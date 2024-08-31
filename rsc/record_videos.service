@@ -6,7 +6,7 @@ StartLimitInterval=0
 [Service]
 Restart=always
 RestartSec=1s
-ExecStart=%h/go/bin/record-videos -camera /dev/video0 -w 1280 -h 720 -fps 15 -root %h/Recordings -addr :8081
+ExecStart=%h/go/bin/record-videos -src /dev/video0 -w 1280 -h 720 -fps 15 -root %h/Recordings -addr :8081
 
 [Install]
 WantedBy=default.target
