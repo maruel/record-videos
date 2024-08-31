@@ -30,8 +30,10 @@ type motionOptions struct {
 	// average pixel brightness when two frames are substracted and then an edge
 	// detection algorithm is ran over.
 	yThreshold float64
-	// preCapture is the duration to record before the motion.
+	// preCapture is the duration to record before the motion is detected.
 	preCapture time.Duration
+	// postCapture is the duration to record after the motion is timed out.
+	postCapture time.Duration
 	// motionExpiration is the duration after which a motion is timed out.
 	motionExpiration time.Duration
 	// ignoreFirstFrames ignores motion detection from these initial frames. Many
@@ -253,7 +255,7 @@ loop:
 				last = event.t
 			}
 			start := last.Add(-mo.preCapture)
-			end := event.t.Add(reprocess)
+			end := event.t.Add(reprocess + mo.postCapture)
 			if err := generateM3U8(root, last, start, end); err != nil {
 				return err
 			}
