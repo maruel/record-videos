@@ -38,8 +38,9 @@ var (
 
 // broadcastFrames broadcast MPJPEG frames to listeners.
 type broadcastFrames struct {
-	mu sync.Mutex
-	l  []chan []byte
+	mu        sync.Mutex
+	lastFrame []byte
+	listeners []chan []byte
 }
 
 // listen reads ffmpeg's mpjpeg mime stream, decodes it, then send it to
@@ -67,8 +68,9 @@ func (b *broadcastFrames) listen(ctx context.Context, r io.Reader) {
 		//	Content-type: image/jpeg
 		//	Content-length: 1234
 		b.mu.Lock()
-		l := make([]chan []byte, len(b.l))
-		copy(l, b.l)
+		b.lastFrame = frame
+		l := make([]chan []byte, len(b.listeners))
+		copy(l, b.listeners)
 		b.mu.Unlock()
 		for _, x := range l {
 			select {
@@ -82,27 +84,30 @@ func (b *broadcastFrames) listen(ctx context.Context, r io.Reader) {
 func (b *broadcastFrames) relay(ctx context.Context) iter.Seq[[]byte] {
 	ch := make(chan []byte, 1)
 	b.mu.Lock()
-	b.l = append(b.l, ch)
+	b.listeners = append(b.listeners, ch)
+	frame := b.lastFrame
 	b.mu.Unlock()
 	return func(yield func([]byte) bool) {
 		defer func() {
 			b.mu.Lock()
-			for i := range b.l {
-				if b.l[i] == ch {
-					copy(b.l[i:], b.l[i+1:])
-					b.l = b.l[:len(b.l)-1]
+			for i := range b.listeners {
+				if b.listeners[i] == ch {
+					copy(b.listeners[i:], b.listeners[i+1:])
+					b.listeners = b.listeners[:len(b.listeners)-1]
 					break
 				}
 			}
 			b.mu.Unlock()
 		}()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case frame := <-ch:
-				if !yield(frame) {
+		if ctx.Err() == nil && yield(frame) {
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case frame := <-ch:
+					if !yield(frame) {
+						return
+					}
 				}
 			}
 		}
