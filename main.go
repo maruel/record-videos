@@ -202,10 +202,16 @@ func mainImpl() error {
 		verbose: *verbose,
 	}
 	mo := &motionOptions{
-		yThreshold:   *yavg,
-		onEventStart: *onEventStart,
-		onEventEnd:   *onEventEnd,
-		webhook:      *webhook,
+		yThreshold: *yavg,
+		// libx264 can buffer 30s at a time.
+		// TODO: Fix this once re-encoding in MP4 is done.
+		preCapture:         31 * time.Second,
+		motionExpiration:   5 * time.Second,
+		ignoreFirstFrames:  10,
+		ignoreFirstMoments: 5 * time.Second,
+		onEventStart:       *onEventStart,
+		onEventEnd:         *onEventEnd,
+		webhook:            *webhook,
 	}
 	return run(ctx, *root, *addr, fo, mo)
 }

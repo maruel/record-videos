@@ -373,6 +373,8 @@ type ffmpegOptions struct {
 	mjpeg bool
 	// verbose increases ffmpeg's output.
 	verbose bool
+
+	_ struct{}
 }
 
 // buildFFMPEGCmd builds the command line to exec ffmpeg.

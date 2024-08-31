@@ -26,10 +26,30 @@ import (
 
 // motionOptions is the options for motion detection and recording.
 type motionOptions struct {
-	yThreshold   float64
+	// yThreshold determines the motion sensitivity as per the Y (from YUV)
+	// average pixel brightness when two frames are substracted and then an edge
+	// detection algorithm is ran over.
+	yThreshold float64
+	// preCapture is the duration to record before the motion.
+	preCapture time.Duration
+	// motionExpiration is the duration after which a motion is timed out.
+	motionExpiration time.Duration
+	// ignoreFirstFrames ignores motion detection from these initial frames. Many
+	// cameras will auto-focus and cause a lot of artificial motion when starting
+	// up.
+	ignoreFirstFrames int
+	// ignoreFirstMoments ignores motion detection when the stream starts.
+	ignoreFirstMoments time.Duration
+
+	// onEventStart is a script to run upon motion detection.
 	onEventStart string
-	onEventEnd   string
-	webhook      string
+	// onEventEnd is a script to run upon motion timeout.
+	onEventEnd string
+	// webhook is a webhook to call with application/json content
+	// `{"motion":true}` upon motion and a second time with false upon timeout.
+	webhook string
+
+	_ struct{}
 }
 
 // yLevel is the level of Y channel average on the image, which is the
@@ -93,13 +113,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 
 // filterMotion converts raw Y data into motion detection events.
 func filterMotion(ctx context.Context, mo *motionOptions, start time.Time, ch <-chan yLevel, events chan<- motionEvent) error {
-	// Eventually configuration values:
-	const motionExpiration = 5 * time.Second
-	// TODO: Get the ready signal from MPJPEG reader.
-	// Many cameras will auto-focus and cause a lot of artificial motion when
-	// starting up.
-	const ignoreFirstFrames = 10
-	const ignoreFirstMoments = 5 * time.Second
+	// TODO: Get the ready signal from MPJPEG reader!
 	done := ctx.Done()
 	var motionTimeout <-chan time.Time
 	inMotion := false
@@ -116,8 +130,8 @@ func filterMotion(ctx context.Context, mo *motionOptions, start time.Time, ch <-
 			if l.yavg > 0.1 {
 				slog.Info("yLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "f", l.frame, "yavg", l.yavg)
 			}
-			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstMoments && l.yavg >= mo.yThreshold {
-				motionTimeout = time.After(motionExpiration - time.Since(l.t))
+			if l.frame >= mo.ignoreFirstFrames && l.t.Sub(start) >= mo.ignoreFirstMoments && l.yavg >= mo.yThreshold {
+				motionTimeout = time.After(mo.motionExpiration - time.Since(l.t))
 				if !inMotion {
 					inMotion = true
 					events <- motionEvent{t: l.t, start: true}
@@ -206,9 +220,6 @@ func processMotion(ctx context.Context, mo *motionOptions, root string, ch <-cha
 	// It will be performant and much easier to manage! This enables us to keep X
 	// last days of full recording as .ts files and motion for Y last days as
 	// .mp4, where Y is significantly larger than X.
-
-	// libx264 can buffer 30s at a time.
-	const lookBack = 31 * time.Second
 	const reprocess = time.Minute
 	var toGen [][3]time.Time
 	var last time.Time
@@ -241,7 +252,7 @@ loop:
 				// Create a simple m3u8 file. Will be populated later.
 				last = event.t
 			}
-			start := last.Add(-lookBack)
+			start := last.Add(-mo.preCapture)
 			end := event.t.Add(reprocess)
 			if err := generateM3U8(root, last, start, end); err != nil {
 				return err
