@@ -121,6 +121,8 @@ var (
 
 	// scaleHalf reduces the image by half on both dimensions, to reduce the
 	// processing power required by 75%.
+	//
+	// https://ffmpeg.org/ffmpeg-filters.html#scale-1
 	scaleHalf filter = "scale=w=iw/2:h=ih/2"
 
 	// motionEdgeDetect does motion detection by calculating the edges on the delta
@@ -355,11 +357,20 @@ func constructFilterGraph(s style, w, h int) filterGraph {
 
 // buildFFMPEGCmd builds the command line to exec ffmpeg.
 //
+// src is the source video.
+// mask is an optional file path to a mask.
+// w, h, fps are frame size and frame rate.
+// d is the optional duration limit of recording, mainly for testing.
+// style controls the video format generated, see style's documentation.
+// codec is one of h264 or libx265. libx265 takes about twice the CPU usage.
+// mjpeg determines is the MJPEG stream is enabled.
+// verbose increases ffmpeg's output.
+//
 // Outputs:
 // - HLS and all.m3u8 into the current working directory.
 // - YAVG metadata to the first pipe in ExtraFiles.
 // - Mime encoded MJPEG to the second pipe in ExtraFiles, if mjpeg is true.
-func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, mjpeg, verbose bool) ([]string, error) {
+func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, codec string, mjpeg, verbose bool) ([]string, error) {
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
@@ -376,6 +387,8 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, m
 		args = append(args, "-loglevel", "repeat+warning")
 	}
 	if strings.HasPrefix(src, "tcp://") {
+		// This is hardcoding the raspivid use case. Create an issue if this is a
+		// problem.
 		args = append(args, "-f", "h264")
 	} else {
 		switch runtime.GOOS {
@@ -441,10 +454,10 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, m
 		args = append(args, "-t", fmt.Sprintf("%.1fs", float64(d)/float64(time.Second)))
 	}
 
-	// HLS in h264:
+	// HLS:
 	args = append(args,
 		"-map", hlsOut,
-		"-c:v", "h264",
+		"-c:v", codec,
 		"-preset", "fast",
 		"-crf", "30",
 		"-f", "hls",

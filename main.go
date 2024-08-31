@@ -32,7 +32,7 @@ import (
 //
 // TODO: transparently restart ffmpeg as needed, instead of exiting the whole
 // program.
-func run(ctx context.Context, src string, s style, d time.Duration, w, h, fps int, yavg float64, mask, root, addr, onEventStart, onEventEnd, webhook string) error {
+func run(ctx context.Context, src, mask string, w, h, fps int, d time.Duration, s style, codec string, yavg float64, root, addr, onEventStart, onEventEnd, webhook string) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -72,7 +72,7 @@ func run(ctx context.Context, src string, s style, d time.Duration, w, h, fps in
 	}
 	mjpeg := addr != ""
 	verbose := slog.Default().Enabled(ctx, slog.LevelDebug)
-	args, err := buildFFMPEGCmd(src, mask, w, h, fps, d, s, mjpeg, verbose)
+	args, err := buildFFMPEGCmd(src, mask, w, h, fps, d, s, codec, mjpeg, verbose)
 	if err != nil {
 		return err
 	}
@@ -129,14 +129,15 @@ func mainImpl() error {
 	}))
 	slog.SetDefault(logger)
 	src := flag.String("src", "", "source to use: either a local device or a remote port, see README.md for more information")
+	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
 	w := flag.Int("w", 1280, "width")
 	h := flag.Int("h", 720, "height")
 	fps := flag.Int("fps", 15, "frame rate")
-	yavg := flag.Float64("yavg", 1., "Y average sensitivity, higher value means lower sensitivity")
 	d := flag.Duration("d", 0, "record for a specified duration (for testing)")
 	s := validStyles[0]
 	flag.Var(&s, "style", "style to use")
-	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
+	codec := flag.String("codec", "h264", "codec to use; libx265 takes significantly more CPU")
+	yavg := flag.Float64("yavg", 1., "Y average sensitivity, higher value means lower sensitivity")
 	root := flag.String("root", ".", "root directory to store videos into")
 	addr := flag.String("addr", "", "optional address to listen to to serve MJPEG")
 	onEventStart := flag.String("on-event-start", "", "script to run on motion event start")
@@ -203,7 +204,7 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-src not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	return run(ctx, *src, s, *d, *w, *h, *fps, *yavg, *mask, *root, *addr, *onEventStart, *onEventEnd, *webhook)
+	return run(ctx, *src, *mask, *w, *h, *fps, *d, s, *codec, *yavg, *root, *addr, *onEventStart, *onEventEnd, *webhook)
 }
 
 func main() {
