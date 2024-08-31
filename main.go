@@ -809,36 +809,8 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 	return nil
 }
 
-func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int, yavg float64, mask, root, addr, onEventStart, onEventEnd, webhook string) error {
-	// References:
-	// - https://ffmpeg.org/ffmpeg-all.html
-	// - https://ffmpeg.org/ffmpeg-codecs.html
-	// - https://ffmpeg.org/ffmpeg-formats.html
-	// - https://ffmpeg.org/ffmpeg-utils.html
-	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
-	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
-	// - https://trac.ffmpeg.org/wiki/Encode/H.264
-	size := strconv.Itoa(w) + "x" + strconv.Itoa(h)
-	metadataR, metadataW, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	defer metadataR.Close()
-	defer func() {
-		if metadataW != nil {
-			_ = metadataW.Close()
-		}
-	}()
-	mjpegR, mjpegW, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	defer mjpegR.Close()
-	defer func() {
-		if mjpegW != nil {
-			_ = mjpegW.Close()
-		}
-	}()
+// buildFFMPEGCmd builds the command line to exec ffmpeg.
+func buildFFMPEGCmd(src, mask, size string, fps int, d time.Duration, style string, mjpeg, verbose bool) ([]string, error) {
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
@@ -849,12 +821,12 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		// present.
 		//"-hwaccel", "auto",
 	}
-	if slog.Default().Enabled(ctx, slog.LevelDebug) {
+	if verbose {
 		args = append(args, "-loglevel", "repeat+info")
 	} else {
 		args = append(args, "-loglevel", "repeat+warning")
 	}
-	if strings.HasPrefix(cam, "tcp://") {
+	if strings.HasPrefix(src, "tcp://") {
 		args = append(args, "-f", "h264")
 	} else {
 		switch runtime.GOOS {
@@ -863,7 +835,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		case "linux":
 			args = append(args, "-f", "v4l2")
 		default:
-			return errors.New("not implemented for this OS")
+			return nil, errors.New("not implemented for this OS")
 		}
 		args = append(args,
 			"-avioflags", "direct",
@@ -881,7 +853,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		//	[video4linux2,v4l2 @ 0x63b48c816180] The driver changed the time per frame from 1/15 to 1/10
 		"-framerate", strconv.Itoa(fps),
 	)
-	args = append(args, "-i", cam)
+	args = append(args, "-i", src)
 	if mask != "" {
 		args = append(args, "-i", mask)
 	} else {
@@ -890,7 +862,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	fg := constructFilterGraph(style, size)
 	hlsOut := "[out]"
 	// MJPEG stream
-	if addr != "" {
+	if mjpeg {
 		fg = append(fg,
 			stream{
 				sources: []string{"[out]"},
@@ -931,14 +903,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	)
 
 	// MPJPEG stream
-	if addr != "" {
-		// MJPEG encapsulated in multi-part MIME demuxer.
-		// An option here would be to use ffmpeg's "-listen 1 http://0.0.0.0:port"
-		// but I failed to make it work. Instead decode and reencode. It's a bit
-		// wasteful but it should be fast enough.
-		if err = startServer(ctx, addr, mjpegR, root); err != nil {
-			return err
-		}
+	if mjpeg {
 		// https://ffmpeg.org/ffmpeg-all.html#pipe
 		args = append(args,
 			"-map", "[outMPJPEG]",
@@ -950,7 +915,66 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 		// Sequence of images (don't forget to disable h264)
 		//args = append(args, "-", "2", "output_frames_%04d.jpg")
 	}
+	return args, nil
+}
 
+// cmdFFMPEG constructs the *exec.Cmd to run ffmpeg.
+func cmdFFMPEG(ctx context.Context, root string, args []string, handles []*os.File) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	// stdin is intentionally not connected.
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	// We use pipes to transfer data (yavg metadata and mime mjeg) and not
+	// stdout. This is much smarter.
+	cmd.ExtraFiles = handles
+	return cmd
+}
+
+func run(ctx context.Context, src, style string, d time.Duration, w, h, fps int, yavg float64, mask, root, addr, onEventStart, onEventEnd, webhook string) error {
+	// References:
+	// - https://ffmpeg.org/ffmpeg-all.html
+	// - https://ffmpeg.org/ffmpeg-codecs.html
+	// - https://ffmpeg.org/ffmpeg-formats.html
+	// - https://ffmpeg.org/ffmpeg-utils.html
+	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
+	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
+	// - https://trac.ffmpeg.org/wiki/Encode/H.264
+	size := strconv.Itoa(w) + "x" + strconv.Itoa(h)
+	metadataR, metadataW, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer metadataR.Close()
+	defer func() {
+		if metadataW != nil {
+			_ = metadataW.Close()
+		}
+	}()
+	mjpegR, mjpegW, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	defer mjpegR.Close()
+	defer func() {
+		if mjpegW != nil {
+			_ = mjpegW.Close()
+		}
+	}()
+	if addr != "" {
+		// MJPEG encapsulated in multi-part MIME demuxer.
+		// An option here would be to use ffmpeg's "-listen 1 http://0.0.0.0:port"
+		// but I failed to make it work. Instead decode and reencode. It's a bit
+		// wasteful but it should be fast enough.
+		if err = startServer(ctx, addr, mjpegR, root); err != nil {
+			return err
+		}
+	}
+	mjpeg := addr != ""
+	verbose := slog.Default().Enabled(ctx, slog.LevelDebug)
+	args, err := buildFFMPEGCmd(src, mask, size, fps, d, style, mjpeg, verbose)
+	if err != nil {
+		return err
+	}
 	ch := make(chan motionLevel, 10)
 	events := make(chan motionEvent, 10)
 	eg, ctx := errgroup.WithContext(ctx)
@@ -958,11 +982,7 @@ func run(ctx context.Context, cam, style string, d time.Duration, w, h, fps int,
 	// If any of the eg.Go() call below returns an error, this will kill ffmpeg
 	// via ctx.
 	// #nosec G204
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-	cmd.Dir = root
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.ExtraFiles = []*os.File{metadataW, mjpegW}
+	cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mjpegW})
 	start := time.Now().Round(10 * time.Millisecond)
 	if err = cmd.Start(); err != nil {
 		return nil
