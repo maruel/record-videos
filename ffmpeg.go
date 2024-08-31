@@ -259,7 +259,7 @@ func constructFilterGraph(style string, w, h int) filterGraph {
 			},
 			{
 				sources: []string{"[motion][maskedred]"},
-				chain:   buildChain("overlay"),
+				chain:   buildChain("overlay", "scale=iw*2:ih*2"),
 				sinks:   []string{"[out]"},
 			},
 		}
@@ -301,7 +301,7 @@ func constructFilterGraph(style string, w, h int) filterGraph {
 			},
 			{
 				sources: []string{"[src2]"},
-				chain:   buildChain(drawTimestamp, "pad='iw*1.5':ih"),
+				chain:   buildChain(drawTimestamp, "pad='iw*2':ih"),
 				sinks:   []string{"[overlay1]"},
 			},
 			{
@@ -320,12 +320,12 @@ func constructFilterGraph(style string, w, h int) filterGraph {
 			},
 			{
 				sources: []string{"[motion][maskedred]"},
-				chain:   buildChain("overlay"),
+				chain:   buildChain("overlay", "scale=iw*2:ih*2"),
 				sinks:   []string{"[overlay2]"},
 			},
 			{
 				sources: []string{"[overlay1][overlay2]"},
-				chain:   buildChain("overlay='2*w'"),
+				chain:   buildChain("overlay='w'"),
 				sinks:   []string{"[out]"},
 			},
 		}
@@ -394,17 +394,20 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, style stri
 	hlsOut := "[out]"
 	// MJPEG stream (optional)
 	if mjpeg {
+		// Append the mjpeg specific filterGraph.
 		fg = append(fg,
 			stream{
 				sources: []string{"[out]"},
 				chain:   buildChain("split=2"),
 				sinks:   []string{"[outHLS]", "[out2]"},
 			},
+			// TODO: Select the frame with the highest YAVG value in the past second.
+			// This would increase jitter slightly but would make a much better
+			// visual when in style "motion_only" or "both".
 			stream{
 				sources: []string{"[out2]"},
-				// scaleHalf ?
-				chain: buildChain("fps=fps=1"),
-				sinks: []string{"[outMPJPEG]"},
+				chain:   buildChain("fps=fps=1"),
+				sinks:   []string{"[outMPJPEG]"},
 			},
 		)
 		hlsOut = "[outHLS]"
