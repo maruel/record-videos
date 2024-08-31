@@ -32,7 +32,7 @@ import (
 //
 // TODO: transparently restart ffmpeg as needed, instead of exiting the whole
 // program.
-func run(ctx context.Context, src, mask string, w, h, fps int, d time.Duration, s style, codec string, yavg float64, root, addr, onEventStart, onEventEnd, webhook string) error {
+func run(ctx context.Context, src, mask string, w, h, fps int, d time.Duration, s style, codec string, root, addr string, mo *motionOptions) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -46,41 +46,28 @@ func run(ctx context.Context, src, mask string, w, h, fps int, d time.Duration, 
 		return err
 	}
 	defer metadataR.Close()
-	defer func() {
-		if metadataW != nil {
-			_ = metadataW.Close()
-		}
-	}()
 	mjpegR, mjpegW, err := os.Pipe()
 	if err != nil {
 		return err
 	}
 	defer mjpegR.Close()
-	defer func() {
-		if mjpegW != nil {
-			_ = mjpegW.Close()
-		}
-	}()
-	if addr != "" {
-		// MJPEG encapsulated in multi-part MIME demuxer.
-		// An option here would be to use ffmpeg's "-listen 1 http://0.0.0.0:port"
-		// but I failed to make it work. Instead decode and reencode. It's a bit
-		// wasteful but it should be fast enough.
-		if err = startServer(ctx, addr, mjpegR, root); err != nil {
-			return err
-		}
-	}
+	defer mjpegW.Close()
+	// Enable mjpeg encoding only if the server is running.
 	mjpeg := addr != ""
 	verbose := slog.Default().Enabled(ctx, slog.LevelDebug)
 	args, err := buildFFMPEGCmd(src, mask, w, h, fps, d, s, codec, mjpeg, verbose)
 	if err != nil {
+		metadataW.Close()
 		return err
 	}
 	eg, ctx := errgroup.WithContext(ctx)
+	if addr != "" {
+		if err = startServer(ctx, addr, mjpegR, root); err != nil {
+			metadataW.Close()
+			return err
+		}
+	}
 
-	// TODO: These will outlive ffmpeg as ffmpeg is transparently restarted when
-	// network or USB goes down.
-	// TODO: Does this requires us to get rid of start?
 	start := time.Now().Round(10 * time.Millisecond)
 	ch := make(chan yLevel, 10)
 	events := make(chan motionEvent, 10)
@@ -90,33 +77,36 @@ func run(ctx context.Context, src, mask string, w, h, fps int, d time.Duration, 
 	})
 	eg.Go(func() error {
 		defer close(events)
-		return filterMotion(ctx, start, yavg, ch, events)
+		return filterMotion(ctx, mo, start, ch, events)
 	})
 	eg.Go(func() error {
-		return processMotion(ctx, root, events, onEventStart, onEventEnd, webhook)
+		return processMotion(ctx, mo, root, events)
 	})
+	eg.Go(func() error {
+		// TODO: Transparently restart ffmpeg when network or USB goes down as long as
+		// the context is not canceled.
+		// One challenge is when the TCP stream stops, it's the keep-alive that
+		// detects that ffmpeg needs to be restarted, so the processMetadata should
+		// be associated with the code here.
+		// TODO: Does this requires us to get rid of start?
 
-	// If any of the eg.Go() call below returns an error, this will kill ffmpeg
-	// via ctx.
-	cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mjpegW})
-	if err = cmd.Start(); err != nil {
-		return nil
-	}
-	// TODO: do not close the write handles as we will reuse them when restarting
-	// ffmpeg. This is so the server can keep the read handles untouched.
-	_ = metadataW.Close()
-	metadataW = nil
-	_ = mjpegW.Close()
-	mjpegW = nil
+		// This is necessary because processMetadata doesn't accept a context.
+		defer metadataW.Close()
 
-	err = cmd.Wait()
-	if err2 := eg.Wait(); err == nil {
-		err = err2
-	}
-	if ctx.Err() == context.Canceled {
+		//for ctx.Err() == nil {
+		// If any of the eg.Go() call above returns an error, this will kill ffmpeg
+		// via ctx.
+		cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mjpegW})
+		if err2 := cmd.Start(); err2 != nil {
+			return err2
+		}
+		// ffmpeg always return an error, so ignore it.
+		_ = cmd.Wait()
+		slog.Info("ffmpeg", "msg", "exit")
+		//}
 		return nil
-	}
-	return err
+	})
+	return eg.Wait()
 }
 
 func mainImpl() error {
@@ -204,11 +194,17 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-src not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	return run(ctx, *src, *mask, *w, *h, *fps, *d, s, *codec, *yavg, *root, *addr, *onEventStart, *onEventEnd, *webhook)
+	mo := &motionOptions{
+		yThreshold:   *yavg,
+		onEventStart: *onEventStart,
+		onEventEnd:   *onEventEnd,
+		webhook:      *webhook,
+	}
+	return run(ctx, *src, *mask, *w, *h, *fps, *d, s, *codec, *root, *addr, mo)
 }
 
 func main() {
-	if err := mainImpl(); err != nil {
+	if err := mainImpl(); err != nil && err != context.Canceled {
 		fmt.Fprintf(os.Stderr, "record-videos: %s\n", err.Error())
 		os.Exit(1)
 	}

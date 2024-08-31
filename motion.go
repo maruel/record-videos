@@ -24,6 +24,14 @@ import (
 	"time"
 )
 
+// motionOptions is the options for motion detection and recording.
+type motionOptions struct {
+	yThreshold   float64
+	onEventStart string
+	onEventEnd   string
+	webhook      string
+}
+
 // yLevel is the level of Y channel average on the image, which is the
 // amount of edge movements detected.
 type yLevel struct {
@@ -84,7 +92,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 }
 
 // filterMotion converts raw Y data into motion detection events.
-func filterMotion(ctx context.Context, start time.Time, yavg float64, ch <-chan yLevel, events chan<- motionEvent) error {
+func filterMotion(ctx context.Context, mo *motionOptions, start time.Time, ch <-chan yLevel, events chan<- motionEvent) error {
 	// Eventually configuration values:
 	const motionExpiration = 5 * time.Second
 	// TODO: Get the ready signal from MPJPEG reader.
@@ -108,7 +116,7 @@ func filterMotion(ctx context.Context, start time.Time, yavg float64, ch <-chan 
 			if l.yavg > 0.1 {
 				slog.Info("yLevel", "t", l.t.Format("2006-01-02T15:04:05.00"), "f", l.frame, "yavg", l.yavg)
 			}
-			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstMoments && l.yavg >= yavg {
+			if l.frame >= ignoreFirstFrames && l.t.Sub(start) >= ignoreFirstMoments && l.yavg >= mo.yThreshold {
 				motionTimeout = time.After(motionExpiration - time.Since(l.t))
 				if !inMotion {
 					inMotion = true
@@ -193,7 +201,7 @@ func runCmd(ctx context.Context, a string) error {
 }
 
 // processMotion reacts to motion start and stop events.
-func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEventStart, onEventEnd, webhook string) error {
+func processMotion(ctx context.Context, mo *motionOptions, root string, ch <-chan motionEvent) error {
 	// TODO: Instead of generating m3u8 files, create MP4 files using -v:c copy.
 	// It will be performant and much easier to manage! This enables us to keep X
 	// last days of full recording as .ts files and motion for Y last days as
@@ -205,6 +213,8 @@ func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEv
 	var toGen [][3]time.Time
 	var last time.Time
 	var retryGen <-chan time.Time
+	done := ctx.Done()
+loop:
 	for {
 		select {
 		case n := <-retryGen:
@@ -220,14 +230,11 @@ func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEv
 			if len(toGen) != 0 {
 				retryGen = time.After(reprocess)
 			}
+		case <-done:
+			break loop
 		case event, ok := <-ch:
 			if !ok {
-				for _, l := range toGen {
-					if err := generateM3U8(root, l[0], l[1], l[2]); err != nil {
-						return err
-					}
-				}
-				return nil
+				break loop
 			}
 			slog.Info("motionEvent", "t", event.t.Format("2006-01-02T15:04:05.00"), "start", event.start)
 			if event.start {
@@ -244,29 +251,35 @@ func processMotion(ctx context.Context, root string, ch <-chan motionEvent, onEv
 				retryGen = time.After(reprocess)
 			}
 			if event.start {
-				if onEventStart != "" {
-					if err := runCmd(ctx, onEventStart); err != nil {
-						slog.Error("on_event_start", "p", onEventStart, "err", err)
+				if mo.onEventStart != "" {
+					if err := runCmd(ctx, mo.onEventStart); err != nil {
+						slog.Error("on_event_start", "p", mo.onEventStart, "err", err)
 					}
 				}
 			} else {
-				if onEventEnd != "" {
-					if err := runCmd(ctx, onEventEnd); err != nil {
-						slog.Error("on_event_end", "p", onEventEnd, "err", err)
+				if mo.onEventEnd != "" {
+					if err := runCmd(ctx, mo.onEventEnd); err != nil {
+						slog.Error("on_event_end", "p", mo.onEventEnd, "err", err)
 					}
 				}
 			}
-			if webhook != "" {
+			if mo.webhook != "" {
 				d, _ := json.Marshal(map[string]bool{"motion": event.start})
-				slog.Info("webhook", "url", webhook, "motion", event.start)
+				slog.Info("webhook", "url", mo.webhook, "motion", event.start)
 				// #nosec G107
-				resp, err := http.Post(webhook, "application/json", bytes.NewReader(d))
+				resp, err := http.Post(mo.webhook, "application/json", bytes.NewReader(d))
 				if err != nil {
-					slog.Error("webhook", "url", webhook, "motion", event.start, "err", err)
+					slog.Error("webhook", "url", mo.webhook, "motion", event.start, "err", err)
 				} else {
 					_ = resp.Body.Close()
 				}
 			}
 		}
 	}
+	for _, l := range toGen {
+		if err := generateM3U8(root, l[0], l[1], l[2]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
