@@ -145,26 +145,45 @@ var (
 	printFilteredYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:function=greater:value=0.1:file='pipe\\:3':direct=1"
 )
 
+type style string
+
+func (s *style) Set(v string) error {
+	options := ""
+	for i, x := range validStyles {
+		if v == string(x) {
+			*s = x
+			return nil
+		}
+		if i != 0 {
+			options += ", "
+		}
+		options += string(x)
+	}
+	return errors.New("invalid style. Supported values are: " + options)
+}
+
+func (s *style) String() string {
+	return string(*s)
+}
+
+// validStyles is the valid style values for constructFilterGraph.
+var validStyles = []style{"normal", "normal_no_mask", "both", "motion_only"}
+
 // constructFilterGraph constructs the argument for -filter_complex.
-func constructFilterGraph(style string, w, h int) filterGraph {
-	// I could use scale2ref instead of manually specifying size for the black
-	// mask buffer but I am guessing this will be significantly slower.
+func constructFilterGraph(s style, w, h int) filterGraph {
 	halfSize := strconv.Itoa(w/2) + "x" + strconv.Itoa(h/2)
-	var out filterGraph
-	switch style {
+	switch s {
 	case "normal":
-		out = filterGraph{
+		return filterGraph{
 			{
 				sources: []string{"[0:v]"},
 				chain:   buildChain("hqdn3d", "split=2"),
 				sinks:   []string{"[src1]", "[src2]"},
 			},
 			{
-				// Scale mask to half.
 				sources: []string{"[1:v]"},
-
-				chain: buildChain("scale=" + halfSize),
-				sinks: []string{"[mask]"},
+				chain:   buildChain("scale=" + halfSize),
+				sinks:   []string{"[mask]"},
 			},
 			{
 				sources: []string{"[src1]"},
@@ -196,7 +215,7 @@ func constructFilterGraph(style string, w, h int) filterGraph {
 			},
 		}
 	case "normal_no_mask":
-		out = filterGraph{
+		return filterGraph{
 			{
 				sources: []string{"[0:v]"},
 				chain:   buildChain("hqdn3d", "split=2"),
@@ -213,7 +232,7 @@ func constructFilterGraph(style string, w, h int) filterGraph {
 			},
 		}
 	case "motion_only":
-		out = filterGraph{
+		return filterGraph{
 			{
 				sources: []string{"[0:v]"},
 				chain:   buildChain("hqdn3d", scaleHalf),
@@ -264,7 +283,7 @@ func constructFilterGraph(style string, w, h int) filterGraph {
 			},
 		}
 	case "both":
-		out = filterGraph{
+		return filterGraph{
 			{
 				sources: []string{"[0:v]"},
 				chain:   buildChain("hqdn3d", "split=2"),
@@ -330,9 +349,8 @@ func constructFilterGraph(style string, w, h int) filterGraph {
 			},
 		}
 	default:
-		panic("unknown style " + style)
+		panic("unknown style " + s)
 	}
-	return out
 }
 
 // buildFFMPEGCmd builds the command line to exec ffmpeg.
@@ -341,7 +359,7 @@ func constructFilterGraph(style string, w, h int) filterGraph {
 // - HLS and all.m3u8 into the current working directory.
 // - YAVG metadata to the first pipe in ExtraFiles.
 // - Mime encoded MJPEG to the second pipe in ExtraFiles, if mjpeg is true.
-func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, style string, mjpeg, verbose bool) ([]string, error) {
+func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, mjpeg, verbose bool) ([]string, error) {
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
@@ -390,7 +408,7 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, style stri
 	} else {
 		args = append(args, "-f", "lavfi", "-i", "color=color=white:size=32x32")
 	}
-	fg := constructFilterGraph(style, w, h)
+	fg := constructFilterGraph(s, w, h)
 	hlsOut := "[out]"
 	// MJPEG stream (optional)
 	if mjpeg {

@@ -8,8 +8,7 @@ import "testing"
 
 func Test(t *testing.T) {
 	// Just make sure it doesn't crash.
-	constructFilterGraph("normal", 640, 480)
-	constructFilterGraph("normal_no_mask", 640, 480)
-	constructFilterGraph("motion_only", 640, 480)
-	constructFilterGraph("both", 640, 480)
+	for _, s := range validStyles {
+		constructFilterGraph(s, 640, 480)
+	}
 }

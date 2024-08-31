@@ -32,7 +32,7 @@ import (
 //
 // TODO: transparently restart ffmpeg as needed, instead of exiting the whole
 // program.
-func run(ctx context.Context, src, style string, d time.Duration, w, h, fps int, yavg float64, mask, root, addr, onEventStart, onEventEnd, webhook string) error {
+func run(ctx context.Context, src string, s style, d time.Duration, w, h, fps int, yavg float64, mask, root, addr, onEventStart, onEventEnd, webhook string) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -72,7 +72,7 @@ func run(ctx context.Context, src, style string, d time.Duration, w, h, fps int,
 	}
 	mjpeg := addr != ""
 	verbose := slog.Default().Enabled(ctx, slog.LevelDebug)
-	args, err := buildFFMPEGCmd(src, mask, w, h, fps, d, style, mjpeg, verbose)
+	args, err := buildFFMPEGCmd(src, mask, w, h, fps, d, s, mjpeg, verbose)
 	if err != nil {
 		return err
 	}
@@ -119,22 +119,6 @@ func run(ctx context.Context, src, style string, d time.Duration, w, h, fps int,
 	return err
 }
 
-type styleVar string
-
-func (s *styleVar) Set(v string) error {
-	switch v {
-	case "normal", "normal_no_mask", "both", "motion_only":
-		*s = styleVar(v)
-		return nil
-	default:
-		return errors.New("invalid style. Supported values are: normal, normal_no_mask, both, motion_only")
-	}
-}
-
-func (s *styleVar) String() string {
-	return string(*s)
-}
-
 func mainImpl() error {
 	var level slog.LevelVar
 	level.Set(slog.LevelInfo)
@@ -150,8 +134,8 @@ func mainImpl() error {
 	fps := flag.Int("fps", 15, "frame rate")
 	yavg := flag.Float64("yavg", 1., "Y average sensitivity, higher value means lower sensitivity")
 	d := flag.Duration("d", 0, "record for a specified duration (for testing)")
-	style := styleVar("normal")
-	flag.Var(&style, "style", "style to use")
+	s := validStyles[0]
+	flag.Var(&s, "style", "style to use")
 	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
 	root := flag.String("root", ".", "root directory to store videos into")
 	addr := flag.String("addr", "", "optional address to listen to to serve MJPEG")
@@ -216,7 +200,7 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-camera not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
-	return run(ctx, *cam, style.String(), *d, *w, *h, *fps, *yavg, *mask, *root, *addr, *onEventStart, *onEventEnd, *webhook)
+	return run(ctx, *cam, s, *d, *w, *h, *fps, *yavg, *mask, *root, *addr, *onEventStart, *onEventEnd, *webhook)
 }
 
 func main() {
