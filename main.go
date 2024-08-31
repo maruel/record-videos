@@ -29,10 +29,7 @@ import (
 )
 
 // run is the main loop.
-//
-// TODO: transparently restart ffmpeg as needed, instead of exiting the whole
-// program.
-func run(ctx context.Context, src, mask string, w, h, fps int, d time.Duration, s style, codec string, root, addr string, mo *motionOptions) error {
+func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOptions) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -52,18 +49,15 @@ func run(ctx context.Context, src, mask string, w, h, fps int, d time.Duration, 
 	}
 	defer mjpegR.Close()
 	defer mjpegW.Close()
-	// Enable mjpeg encoding only if the server is running.
-	mjpeg := addr != ""
-	verbose := slog.Default().Enabled(ctx, slog.LevelDebug)
-	args, err := buildFFMPEGCmd(src, mask, w, h, fps, d, s, codec, mjpeg, verbose)
+	args, err := buildFFMPEGCmd(fo)
 	if err != nil {
-		metadataW.Close()
+		_ = metadataW.Close()
 		return err
 	}
 	eg, ctx := errgroup.WithContext(ctx)
 	if addr != "" {
 		if err = startServer(ctx, addr, mjpegR, root); err != nil {
-			metadataW.Close()
+			_ = metadataW.Close()
 			return err
 		}
 	}
@@ -194,13 +188,26 @@ func mainImpl() error {
 		}
 		return fmt.Errorf("-src not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
+	fo := &ffmpegOptions{
+		src:   *src,
+		mask:  *mask,
+		w:     *w,
+		h:     *h,
+		fps:   *fps,
+		d:     *d,
+		s:     s,
+		codec: *codec,
+		// Enable mjpeg encoding only if the server is running.
+		mjpeg:   *addr != "",
+		verbose: *verbose,
+	}
 	mo := &motionOptions{
 		yThreshold:   *yavg,
 		onEventStart: *onEventStart,
 		onEventEnd:   *onEventEnd,
 		webhook:      *webhook,
 	}
-	return run(ctx, *src, *mask, *w, *h, *fps, *d, s, *codec, *root, *addr, mo)
+	return run(ctx, *root, *addr, fo, mo)
 }
 
 func main() {

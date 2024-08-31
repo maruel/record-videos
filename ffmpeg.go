@@ -355,22 +355,33 @@ func constructFilterGraph(s style, w, h int) filterGraph {
 	}
 }
 
+// ffmpegOptions is the options to pass to ffmpeg to retrieve the video.
+type ffmpegOptions struct {
+	// src is the source video.
+	src string
+	// mask is an optional file path to a mask.
+	mask string
+	// w, h, fps are frame size and frame rate.
+	w, h, fps int
+	// d is the optional duration limit of recording, mainly for testing.
+	d time.Duration
+	// s controls the video format generated, see style's documentation.
+	s style
+	// codec is one of h264 or libx265. libx265 takes about twice the CPU usage.
+	codec string
+	// mjpeg determines is the MJPEG stream is enabled.
+	mjpeg bool
+	// verbose increases ffmpeg's output.
+	verbose bool
+}
+
 // buildFFMPEGCmd builds the command line to exec ffmpeg.
-//
-// src is the source video.
-// mask is an optional file path to a mask.
-// w, h, fps are frame size and frame rate.
-// d is the optional duration limit of recording, mainly for testing.
-// style controls the video format generated, see style's documentation.
-// codec is one of h264 or libx265. libx265 takes about twice the CPU usage.
-// mjpeg determines is the MJPEG stream is enabled.
-// verbose increases ffmpeg's output.
 //
 // Outputs:
 // - HLS and all.m3u8 into the current working directory.
 // - YAVG metadata to the first pipe in ExtraFiles.
 // - Mime encoded MJPEG to the second pipe in ExtraFiles, if mjpeg is true.
-func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, codec string, mjpeg, verbose bool) ([]string, error) {
+func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
@@ -381,12 +392,12 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, c
 		// present.
 		//"-hwaccel", "auto",
 	}
-	if verbose {
+	if o.verbose {
 		args = append(args, "-loglevel", "repeat+info")
 	} else {
 		args = append(args, "-loglevel", "repeat+warning")
 	}
-	if strings.HasPrefix(src, "tcp://") {
+	if strings.HasPrefix(o.src, "tcp://") {
 		// This is hardcoding the raspivid use case. Create an issue if this is a
 		// problem.
 		args = append(args, "-f", "h264")
@@ -408,25 +419,25 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, c
 			"-probesize", "32",
 			"-fpsprobesize", "0",
 			"-analyzeduration", "0",
-			"-video_size", strconv.Itoa(w)+"x"+strconv.Itoa(h))
+			"-video_size", strconv.Itoa(o.w)+"x"+strconv.Itoa(o.h))
 	}
 	args = append(args,
 		// Warning: the camera driver may decide another framerate. Sadly this fact
 		// is output by ffmpeg at info level, not warning level. Use the "-v" flag
 		// to see it. It looks like:
 		//	[video4linux2,v4l2 @ 0x63b48c816180] The driver changed the time per frame from 1/15 to 1/10
-		"-framerate", strconv.Itoa(fps),
+		"-framerate", strconv.Itoa(o.fps),
 	)
-	args = append(args, "-i", src)
-	if mask != "" {
-		args = append(args, "-i", mask)
+	args = append(args, "-i", o.src)
+	if o.mask != "" {
+		args = append(args, "-i", o.mask)
 	} else {
 		args = append(args, "-f", "lavfi", "-i", "color=color=white:size=32x32")
 	}
-	fg := constructFilterGraph(s, w, h)
+	fg := constructFilterGraph(o.s, o.w, o.h)
 	hlsOut := "[out]"
 	// MJPEG stream (optional)
-	if mjpeg {
+	if o.mjpeg {
 		// Append the mjpeg specific filterGraph.
 		fg = append(fg,
 			stream{
@@ -448,16 +459,16 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, c
 	args = append(args,
 		"-filter_complex", fg.String(),
 	)
-	if d > 0 {
+	if o.d > 0 {
 		// Limit runtime for local testing.
 		// https://ffmpeg.org/ffmpeg-utils.html#time-duration-syntax
-		args = append(args, "-t", fmt.Sprintf("%.1fs", float64(d)/float64(time.Second)))
+		args = append(args, "-t", fmt.Sprintf("%.1fs", float64(o.d)/float64(time.Second)))
 	}
 
 	// HLS:
 	args = append(args,
 		"-map", hlsOut,
-		"-c:v", codec,
+		"-c:v", o.codec,
 		"-preset", "fast",
 		"-crf", "30",
 		"-f", "hls",
@@ -472,7 +483,7 @@ func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, s style, c
 	)
 
 	// MPJPEG stream
-	if mjpeg {
+	if o.mjpeg {
 		// https://ffmpeg.org/ffmpeg-all.html#pipe
 		args = append(args,
 			"-map", "[outMPJPEG]",
