@@ -1,16 +1,17 @@
 # record-videos
 
-- Streams video over MJPEG
-- Detects motion
-- Save recording to disk
-- Integrates with [Home Assistant](#integration-with-home-assistant)
-
-To be used along with https://github.com/maruel/serve-videos.
+- High performance: uses 50% less power than Motion enabling high quality
+  streams.
+- Detects motion accurately via edge detection on the time blended difference.
+- Efficiently save *continuous* recording to disk.
+- Seamlessly integrate with [Home Assistant](#integration-with-home-assistant)
+  - Streams frames over MJPEG for live viewing.
+  - Define a motion sensor via webhook.
 
 
 ## Installation
 
-1. Install prerequisites [FFmpeg](https://ffmpeg.org/download.html) and [Go](https://go.dev/dl).
+1. Install prerequisites: [FFmpeg](https://ffmpeg.org/download.html) and [Go](https://go.dev/dl).
 2. Install `record-videos`:
 
 ```
@@ -34,6 +35,9 @@ The command will look like:
 ```
 record-videos -src "FaceTime HD Camera" -fps 30 -root out
 ```
+
+TODO: Describe how to set as a server via
+[launchd](https://support.apple.com/guide/terminal/apdc6c1077b-5d5d-4d35-9c19-60f2397b2369/mac).
 
 
 ### linux
@@ -152,3 +156,29 @@ template:
 **3**: Add the camera and motion detection signal to Home Assistant's
 [UI](https://home-assistant.io/dashboards/)
 and/or create an [automation](https://home-assistant.io/docs/automation/).
+
+![Home Assistant Dashboard](https://github.com/user-attachments/assets/a1c65608-d96f-4b74-b0e5-af992026b822)
+
+The two entities that created this:
+
+1) Camera:
+```
+show_state: false
+show_name: false
+camera_view: live
+type: picture-entity
+entity: camera.my_webcam
+camera_image: camera.my_webcam
+aspect_ratio: 16x9
+```
+
+2) Motion detector:
+
+```
+type: entities
+entities:
+  - entity: binary_sensor.my_motion_detector
+      secondary_info: last-changed
+      show_header_toggle: false
+```
+
