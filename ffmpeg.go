@@ -17,6 +17,8 @@ import (
 	"time"
 )
 
+// "-filter_complex" argument building code. This is generic reusable code.
+
 // filter is a filter supported by libavfilter.
 //
 // They are described at https://ffmpeg.org/ffmpeg-filters.html.
@@ -61,55 +63,6 @@ func buildChain(next ...any) chain {
 	return out
 }
 
-// drawTimestamp draws the current timestamp as an overlay.
-const drawTimestamp filter = "drawtext=" +
-	"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
-	"text='%{localtime\\:%Y-%m-%d %T}':" +
-	"x=(w-text_w-10):" +
-	"y=(h-text_h-10):" +
-	"fontsize=48:" +
-	"fontcolor=white:" +
-	"box=1:" +
-	"boxcolor=black@0.5"
-
-// drawYAVG draws the YAVG on the image for debugging. Requires signalstats.
-//
-// TODO: Figure out how to round the number printed out.
-const drawYAVG filter = "drawtext=" +
-	"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
-	"text='%{metadata\\:lavfi.signalstats.YAVG}':" +
-	"x=10:" +
-	"y=10:" +
-	"fontsize=48:" +
-	"fontcolor=white:" +
-	"box=1:" +
-	"boxcolor=black@0.5"
-
-// scaleHalf reduces the image by half on both dimensions, to reduce the
-// processing power required by 75%.
-const scaleHalf filter = "scale=w=iw/2:h=ih/2"
-
-// motionEdgeDetect does motion detection by calculating the edges on the delta
-// between each frame pairs.
-var motionEdgeDetect = chain{
-	// Do edge detection. This effectively half the frame rate.
-	"tblend=all_mode=difference", "edgedetect",
-	// Duplicate each frames and reset the frame time stamps.
-	"tpad=stop_mode=clone:stop_duration=1", "setpts=N/FRAME_RATE/TB",
-}
-
-// printYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
-//
-// Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
-const printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:file='pipe\\:3':direct=1"
-
-// printFilteredYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
-//
-// Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
-//
-//lint:ignore U1000 not used because of keep-alive
-const printFilteredYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:function=greater:value=0.1:file='pipe\\:3':direct=1"
-
 // stream is a stream that takes an input, passes it through a chain of filters
 // and sink into the output.
 type stream struct {
@@ -138,10 +91,65 @@ func (f filterGraph) String() string {
 	return out
 }
 
+// The rest is specific to this project.
+
+// Well known filters.
+var (
+	// drawTimestamp draws the current timestamp as an overlay.
+	drawTimestamp filter = "drawtext=" +
+		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
+		"text='%{localtime\\:%Y-%m-%d %T}':" +
+		"x=(w-text_w-10):" +
+		"y=(h-text_h-10):" +
+		"fontsize=48:" +
+		"fontcolor=white:" +
+		"box=1:" +
+		"boxcolor=black@0.5"
+
+	// drawYAVG draws the YAVG on the image for debugging. Requires signalstats.
+	//
+	// TODO: Figure out how to round the number printed out.
+	drawYAVG filter = "drawtext=" +
+		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
+		"text='%{metadata\\:lavfi.signalstats.YAVG}':" +
+		"x=10:" +
+		"y=10:" +
+		"fontsize=48:" +
+		"fontcolor=white:" +
+		"box=1:" +
+		"boxcolor=black@0.5"
+
+	// scaleHalf reduces the image by half on both dimensions, to reduce the
+	// processing power required by 75%.
+	scaleHalf filter = "scale=w=iw/2:h=ih/2"
+
+	// motionEdgeDetect does motion detection by calculating the edges on the delta
+	// between each frame pairs.
+	motionEdgeDetect = chain{
+		// Do edge detection. This effectively half the frame rate.
+		"tblend=all_mode=difference", "edgedetect",
+		// Duplicate each frames and reset the frame time stamps.
+		"tpad=stop_mode=clone:stop_duration=1", "setpts=N/FRAME_RATE/TB",
+	}
+
+	// printYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
+	//
+	// Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
+	printYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:file='pipe\\:3':direct=1"
+
+	// printFilteredYAVGtoPipe prints YAVG to pipe #3 when the value is above 0.1.
+	//
+	// Pipe #3 is the first pipe specified in exec.Cmd.ExtraFiles.
+	//
+	//lint:ignore U1000 not used because of keep-alive
+	printFilteredYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:function=greater:value=0.1:file='pipe\\:3':direct=1"
+)
+
 // constructFilterGraph constructs the argument for -filter_complex.
-func constructFilterGraph(style string, size string) filterGraph {
+func constructFilterGraph(style string, w, h int) filterGraph {
 	// I could use scale2ref instead of manually specifying size for the black
 	// mask buffer but I am guessing this will be significantly slower.
+	halfSize := strconv.Itoa(w/2) + "x" + strconv.Itoa(h/2)
 	var out filterGraph
 	switch style {
 	case "normal":
@@ -152,9 +160,11 @@ func constructFilterGraph(style string, size string) filterGraph {
 				sinks:   []string{"[src1]", "[src2]"},
 			},
 			{
+				// Scale mask to half.
 				sources: []string{"[1:v]"},
-				chain:   buildChain("scale="+size, scaleHalf),
-				sinks:   []string{"[mask]"},
+
+				chain: buildChain("scale=" + halfSize),
+				sinks: []string{"[mask]"},
 			},
 			{
 				sources: []string{"[src1]"},
@@ -167,7 +177,7 @@ func constructFilterGraph(style string, size string) filterGraph {
 				sinks:   []string{"[alpha]"},
 			},
 			{
-				chain: buildChain("color=color=black:size="+size, scaleHalf),
+				chain: buildChain("color=color=black:size=" + halfSize),
 				sinks: []string{"[black]"},
 			},
 			{
@@ -211,7 +221,7 @@ func constructFilterGraph(style string, size string) filterGraph {
 			},
 			{
 				sources: []string{"[1:v]"},
-				chain:   buildChain("scale="+size, scaleHalf, "split=2"),
+				chain:   buildChain("scale="+halfSize, "split=2"),
 				sinks:   []string{"[mask1]", "[mask2]"},
 			},
 			{
@@ -220,7 +230,7 @@ func constructFilterGraph(style string, size string) filterGraph {
 				sinks:   []string{"[alpha]"},
 			},
 			{
-				chain: buildChain("color=color=black:size="+size, scaleHalf),
+				chain: buildChain("color=color=black:size=" + halfSize),
 				sinks: []string{"[black]"},
 			},
 			{
@@ -234,7 +244,7 @@ func constructFilterGraph(style string, size string) filterGraph {
 				sinks:   []string{"[motion]"},
 			},
 			{
-				chain: buildChain("color=color=red:size="+size, scaleHalf),
+				chain: buildChain("color=color=red:size=" + halfSize),
 				sinks: []string{"[red]"},
 			},
 			{
@@ -262,7 +272,7 @@ func constructFilterGraph(style string, size string) filterGraph {
 			},
 			{
 				sources: []string{"[1:v]"},
-				chain:   buildChain("scale="+size, scaleHalf, "split=2"),
+				chain:   buildChain("scale="+halfSize, "split=2"),
 				sinks:   []string{"[mask1]", "[mask2]"},
 			},
 			{
@@ -276,7 +286,7 @@ func constructFilterGraph(style string, size string) filterGraph {
 				sinks:   []string{"[alpha]"},
 			},
 			{
-				chain: buildChain("color=color=black:size="+size, scaleHalf),
+				chain: buildChain("color=color=black:size=" + halfSize),
 				sinks: []string{"[black]"},
 			},
 			{
@@ -295,7 +305,7 @@ func constructFilterGraph(style string, size string) filterGraph {
 				sinks:   []string{"[overlay1]"},
 			},
 			{
-				chain: buildChain("color=color=red:size="+size, scaleHalf),
+				chain: buildChain("color=color=red:size=" + halfSize),
 				sinks: []string{"[red]"},
 			},
 			{
@@ -331,7 +341,7 @@ func constructFilterGraph(style string, size string) filterGraph {
 // - HLS and all.m3u8 into the current working directory.
 // - YAVG metadata to the first pipe in ExtraFiles.
 // - Mime encoded MJPEG to the second pipe in ExtraFiles, if mjpeg is true.
-func buildFFMPEGCmd(src, mask, size string, fps int, d time.Duration, style string, mjpeg, verbose bool) ([]string, error) {
+func buildFFMPEGCmd(src, mask string, w, h, fps int, d time.Duration, style string, mjpeg, verbose bool) ([]string, error) {
 	args := []string{
 		"ffmpeg",
 		"-hide_banner",
@@ -365,7 +375,7 @@ func buildFFMPEGCmd(src, mask, size string, fps int, d time.Duration, style stri
 			"-probesize", "32",
 			"-fpsprobesize", "0",
 			"-analyzeduration", "0",
-			"-video_size", size)
+			"-video_size", strconv.Itoa(w)+"x"+strconv.Itoa(h))
 	}
 	args = append(args,
 		// Warning: the camera driver may decide another framerate. Sadly this fact
@@ -380,9 +390,9 @@ func buildFFMPEGCmd(src, mask, size string, fps int, d time.Duration, style stri
 	} else {
 		args = append(args, "-f", "lavfi", "-i", "color=color=white:size=32x32")
 	}
-	fg := constructFilterGraph(style, size)
+	fg := constructFilterGraph(style, w, h)
 	hlsOut := "[out]"
-	// MJPEG stream
+	// MJPEG stream (optional)
 	if mjpeg {
 		fg = append(fg,
 			stream{

@@ -19,7 +19,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -71,10 +70,9 @@ func run(ctx context.Context, src, style string, d time.Duration, w, h, fps int,
 			return err
 		}
 	}
-	size := strconv.Itoa(w) + "x" + strconv.Itoa(h)
 	mjpeg := addr != ""
 	verbose := slog.Default().Enabled(ctx, slog.LevelDebug)
-	args, err := buildFFMPEGCmd(src, mask, size, fps, d, style, mjpeg, verbose)
+	args, err := buildFFMPEGCmd(src, mask, w, h, fps, d, style, mjpeg, verbose)
 	if err != nil {
 		return err
 	}
@@ -100,7 +98,6 @@ func run(ctx context.Context, src, style string, d time.Duration, w, h, fps int,
 
 	// If any of the eg.Go() call below returns an error, this will kill ffmpeg
 	// via ctx.
-	// #nosec G204
 	cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mjpegW})
 	if err = cmd.Start(); err != nil {
 		return nil
