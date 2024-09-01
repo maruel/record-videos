@@ -9,6 +9,6 @@ import "testing"
 func Test(t *testing.T) {
 	// Just make sure it doesn't crash.
 	for _, s := range validStyles {
-		constructFilterGraph(s, 640, 480)
+		t.Logf("%q", constructFilterGraph(s, 640, 480).String())
 	}
 }

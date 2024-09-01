@@ -30,12 +30,12 @@ type motionOptions struct {
 	// average pixel brightness when two frames are substracted and then an edge
 	// detection algorithm is ran over.
 	yThreshold float64
+	// motionExpiration is the duration after which a motion is timed out.
+	motionExpiration time.Duration
 	// preCapture is the duration to record before the motion is detected.
 	preCapture time.Duration
 	// postCapture is the duration to record after the motion is timed out.
 	postCapture time.Duration
-	// motionExpiration is the duration after which a motion is timed out.
-	motionExpiration time.Duration
 	// ignoreFirstFrames ignores motion detection from these initial frames. Many
 	// cameras will auto-focus and cause a lot of artificial motion when starting
 	// up.
@@ -205,6 +205,22 @@ func generateM3U8(root string, t, start, end time.Time) error {
 	return os.Rename(name+".tmp", name)
 }
 
+func generateMotionRecording(root string, t, start, end time.Time) error {
+	// TODO: Instead of generating m3u8 files, create MP4 file.
+	// It will be performant and much easier to manage! This enables us to keep X
+	// last days of full recording as .ts files and motion for Y last days as
+	// .mp4, where Y is significantly larger than X.
+	// TODO: Figure out the start and end times to know which .ts file to include.
+	//return cmdFFMPEG(ctx, root, []string{"ffmpeg", "-i", "foo.ts", "-v:c", "copy", "-movflags", "faststart", t.Format("2006-01-02T15-04-05") + ".mp4"}, nil).Run()
+	// -copyts
+	// -enc_time_base <epoch>
+	// -timecode
+	// -seek_timestamp
+	// libx264 can buffer 30s at a time.
+	// -stats_enc_pre -stats_enc_pre_fmt pts
+	return generateM3U8(root, t, start.Add(-30*time.Second), end)
+}
+
 // runCmd runs a command and give it at most 1 minute to run.
 func runCmd(ctx context.Context, a string) error {
 	slog.Info("exec", "args", a)
@@ -218,13 +234,13 @@ func runCmd(ctx context.Context, a string) error {
 
 // processMotion reacts to motion start and stop events.
 func processMotion(ctx context.Context, mo *motionOptions, root string, ch <-chan motionEvent) error {
-	// TODO: Instead of generating m3u8 files, create MP4 files using -v:c copy.
-	// It will be performant and much easier to manage! This enables us to keep X
-	// last days of full recording as .ts files and motion for Y last days as
-	// .mp4, where Y is significantly larger than X.
+	// We do not limit the GOP (group of pictures) value in the encoder (libx264,
+	// libx265, etc) so it can buffer 30s at a time. This is what we want, we
+	// want continuous recording to be highly efficient. The downside is that it
+	// creates a delay to generate the motion recordings.
 	const reprocess = time.Minute
 	var toGen [][3]time.Time
-	var last time.Time
+	var lastMotion time.Time
 	var retryGen <-chan time.Time
 	done := ctx.Done()
 loop:
@@ -234,7 +250,7 @@ loop:
 			for len(toGen) != 0 {
 				if l := toGen[0]; n.After(l[2]) {
 					// Best effort.
-					if err := generateM3U8(root, l[0], l[1], l[2]); err != nil {
+					if err := generateMotionRecording(root, l[0], l[1], l[2]); err != nil {
 						return err
 					}
 					toGen = toGen[1:]
@@ -252,11 +268,11 @@ loop:
 			slog.Info("motionEvent", "t", event.t.Format("2006-01-02T15:04:05.00"), "start", event.start)
 			if event.start {
 				// Create a simple m3u8 file. Will be populated later.
-				last = event.t
+				lastMotion = event.t
 			}
-			start := last.Add(-mo.preCapture)
+			start := lastMotion.Add(-mo.preCapture)
 			end := event.t.Add(reprocess + mo.postCapture)
-			if err := generateM3U8(root, last, start, end); err != nil {
+			if err := generateMotionRecording(root, lastMotion, start, end); err != nil {
 				return err
 			}
 			if !event.start {
@@ -289,8 +305,9 @@ loop:
 			}
 		}
 	}
+	// We have to quit now.
 	for _, l := range toGen {
-		if err := generateM3U8(root, l[0], l[1], l[2]); err != nil {
+		if err := generateMotionRecording(root, l[0], l[1], l[2]); err != nil {
 			return err
 		}
 	}

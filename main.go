@@ -202,12 +202,10 @@ func mainImpl() error {
 		verbose: *verbose,
 	}
 	mo := &motionOptions{
-		yThreshold: *yavg,
-		// libx264 can buffer 30s at a time.
-		// TODO: Fix this once re-encoding in MP4 is done!
-		preCapture:         31 * time.Second,
-		postCapture:        2 * time.Second,
+		yThreshold:         *yavg,
 		motionExpiration:   5 * time.Second,
+		preCapture:         5 * time.Second,
+		postCapture:        2 * time.Second,
 		ignoreFirstFrames:  10,
 		ignoreFirstMoments: 5 * time.Second,
 		onEventStart:       *onEventStart,
