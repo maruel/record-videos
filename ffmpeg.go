@@ -146,6 +146,56 @@ var (
 	//
 	//lint:ignore U1000 not used because of keep-alive
 	printFilteredYAVGtoPipe filter = "metadata=print:key=lavfi.signalstats.YAVG:function=greater:value=0.1:file='pipe\\:3':direct=1"
+
+	// skipLowYAVG discards frames with low YAVG.
+	//
+	//lint:ignore U1000 not used because of keep-alive
+	skipLowYAVG filter = "metadata=select:key=lavfi.signalstats.YAVG:function=greater:value=0.1"
+
+	// ok
+	drawRedDot1 filter = "drawbox=x=w/2-10:" +
+		"y=h/2-10:" +
+		"w=20:h=20:color=red:t=fill"
+
+	// ok
+	drawRedDot2 filter = "drawbox=x='w/2-10':" +
+		"y='h/2-10':" +
+		"w=20:h=20:color=red:t=fill"
+
+	// ok
+	drawRedDot3 filter = "drawbox=x='(w/2-10)':y='(h/2-10)':w=20:h=20:color=red:t=fill"
+
+	// ok
+	drawRedDot filter = "drawbox=x=0:y=0:w=20:h=20:color=red:t=fill"
+
+	drawRedDot5 filter = "drawtext=" +
+		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
+		"text='%{metadata\\:lavfi.signalstats.YAVG}':" +
+		"x=0:" +
+		"y=0:" +
+		"fontsize=16:" +
+		"fontcolor=red:"
+
+	// bad
+	drawRedDot96 filter = "drawbox=x=0:y=0:" +
+		"w=20:h=20:color=red:t=fill:enable='if(gt(metadata\\:lavfi.signalstats.YAVG\\,0.5),1,0)'"
+
+	// bad
+	drawRedDot97 filter = "drawbox=x=0:y=0:" +
+		"w=20:h=20:color=red:t=fill:enable='gt(metadata\\:lavfi.signalstats.YAVG\\,0.5)'"
+
+	// bad
+	drawRedDot98 filter = "drawbox=x=0:y=0:" +
+		"w=20:h=20:color=red:t=fill:enable='%{gt(metadata\\:lavfi.signalstats.YAVG\\,0.5)}'"
+
+	// bad
+	drawRedDot99 filter = "drawbox=x=0:y=0:" +
+		"w=20:h=20:color=red:t=fill:enable='%{gt(lavfi.signalstats.YAVG\\,0.5)}'"
+
+	// bad
+	drawRedDot0 filter = "drawbox=x='if(gt(lavfi.signalstats.YAVG,0.5),w/2-10,-100)':" +
+		"y='if(gt(lavfi.signalstats.YAVG,0.5),h/2-10,-100)':" +
+		"w=20:h=20:color=red:t=fill"
 )
 
 type style string
@@ -208,9 +258,54 @@ func constructFilterGraph(s style, w, h int) filterGraph {
 				sinks:   []string{"[masked]"},
 			},
 			{
+				// "sendcmd=c=0-99999999999 'Parsed_drawtext_17 reinit 'fontcolor=white'",
+				// "sendcmd=c=0-99999999999 drawtext@1 reinit 'fontcolor=red'"
 				sources: []string{"[masked]"},
-				chain:   buildChain(motionEdgeDetect, "signalstats", printYAVGtoPipe, "nullsink"),
+				chain: buildChain(motionEdgeDetect, "signalstats",
+					//st(
+					"sendcmd=c=0-99999999999 drawtext@1 fontsize 24",
+					//"sendcmd=c=0-99999999999 drawtext@1 reinit 'fontcolor=white'",
+					//"sendcmd=c='0-99999999999 [expr] drawtext@1 reinit \\'fontcolor=white\\''",
+					printYAVGtoPipe,
+					//"select='gte(n\\, 5)'",
+					skipLowYAVG,
+					//"sendcmd=c=2-99999999999 [expr] drawtext@1 reinit 'fontcolor=red'",
+					// https://git.ffmpeg.org/gitweb/ffmpeg.git/blob/e3a61e91030696348b56361bdf80ea358aef4a19:/libavfilter/vf_drawtext.c#l1233
+					"sendcmd=c=0-99999999999 drawtext@1 fontsize 48",
+					"nullsink"),
 			},
+			/*
+				// "geq=0:0:0:0",
+				//, "crop=32:32"),
+				// , "scale=1280:720"
+				//"format=rgba",
+				//	drawRedDot,
+				//"select='gt(metadata\\:lavfi.signalstats.YAVG\\,0.5)'"
+				{
+					sources: []string{"[masked]"},
+					chain:   buildChain(motionEdgeDetect, "signalstats", "sendcmd=c=0-99999999999 drawtext@1 reinit 'fontcolor=white'", printYAVGtoPipe),
+					sinks:   []string{"[stats]"},
+				},
+				{
+					chain: buildChain("nullsrc=size=32x32"),
+					sinks: []string{"[blank]"},
+				},
+				{
+					sources: []string{"[stats]", "[blank]"},
+					chain:   buildChain("overlay=shortest=1:format=auto:repeatlast=0"),
+					sinks:   []string{"[statsfullfps]"},
+				},
+				{
+					// ,format=yuv420p
+					chain: buildChain("drawbox=x=10:y=10:w=20:h=20:c=red@0.8:enable='gte(mod(maxval(Y),1000000000),0.1)'"),
+					chain: buildChain("drawbox=x=10:y=10:w=20:h=20:c=red@0.8:enable='gte(mod(maxval(Y),1000000000),0.1)'"),
+				},
+				{
+					sources: []string{"[src2]", "[statsfullfps]"},
+					chain:   buildChain("overlay=repeatlast=0:eof_action=pass", drawRedDota, drawTimestamp),
+					sinks:   []string{"[out]"},
+				},
+			*/
 			{
 				sources: []string{"[src2]"},
 				chain:   buildChain(drawTimestamp),
