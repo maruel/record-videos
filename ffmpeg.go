@@ -96,7 +96,7 @@ func (f filterGraph) String() string {
 // Well known filters.
 var (
 	// drawTimestamp draws the current timestamp as an overlay.
-	drawTimestamp filter = "drawtext=" +
+	drawTimestamp filter = "drawtext@1=" +
 		"fontfile=/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf:" +
 		"text='%{localtime\\:%Y-%m-%d %T}':" +
 		"x=(w-text_w-10):" +
@@ -169,7 +169,7 @@ func (s *style) String() string {
 }
 
 // validStyles is the valid style values for constructFilterGraph.
-var validStyles = []style{"normal", "normal_no_mask", "both", "motion_only"}
+var validStyles = []style{"normal", "normal_no_mask", "motion_only", "overlay", "both"}
 
 // constructFilterGraph constructs the argument for -filter_complex.
 func constructFilterGraph(s style, w, h int) filterGraph {
@@ -284,6 +284,48 @@ func constructFilterGraph(s style, w, h int) filterGraph {
 				sinks:   []string{"[out]"},
 			},
 		}
+	case "overlay":
+		return filterGraph{
+			{
+				sources: []string{"[0:v]"},
+				chain:   buildChain("hqdn3d", "split=2"),
+				sinks:   []string{"[src1]", "[src2]"},
+			},
+			{
+				sources: []string{"[1:v]"},
+				chain:   buildChain("scale=" + halfSize),
+				sinks:   []string{"[mask]"},
+			},
+			{
+				sources: []string{"[src1]"},
+				chain:   buildChain(scaleHalf),
+				sinks:   []string{"[srcHalf]"},
+			},
+			{
+				sources: []string{"[srcHalf][mask]"},
+				chain:   buildChain("alphamerge"),
+				sinks:   []string{"[alpha]"},
+			},
+			{
+				chain: buildChain("color=color=black:size=" + halfSize),
+				sinks: []string{"[black]"},
+			},
+			{
+				sources: []string{"[black][alpha]"},
+				chain:   buildChain("overlay"),
+				sinks:   []string{"[masked]"},
+			},
+			{
+				sources: []string{"[masked]"},
+				chain:   buildChain(motionEdgeDetect, "signalstats", printYAVGtoPipe, drawYAVG, "scale=iw*2:ih*2"),
+				sinks:   []string{"[motion]"},
+			},
+			{
+				sources: []string{"[src2]", "[motion]"},
+				chain:   buildChain("blend=lighten", drawTimestamp),
+				sinks:   []string{"[out]"},
+			},
+		}
 	case "both":
 		return filterGraph{
 			{
@@ -395,6 +437,9 @@ func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 		//"-hwaccel", "auto",
 	}
 	if o.verbose {
+		// If you still struggle, you can use debug to get filtergraph information
+		// per frame. The amount of data generated is impractical in steady state.
+		//	args = append(args, "-loglevel", "repeat+debug")
 		args = append(args, "-loglevel", "repeat+info")
 	} else {
 		args = append(args, "-loglevel", "repeat+warning")
