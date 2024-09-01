@@ -8,8 +8,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"iter"
-	"log/slog"
 	"mime/multipart"
 	"net/textproto"
 	"sync"
@@ -42,12 +40,12 @@ func (t *teeMimePart) listen(ctx context.Context, r io.Reader, boundary string) 
 			return err
 		}
 		b, err := io.ReadAll(p)
+		if errors.Is(err, io.EOF) {
+			// We're done.
+			return nil
+		}
 		if err != nil {
 			return err
-		}
-		// First part read.
-		if i == 0 {
-			slog.Info("ready")
 		}
 		pkt := mimePart{p.Header, b}
 		t.mu.Lock()
@@ -63,7 +61,10 @@ func (t *teeMimePart) listen(ctx context.Context, r io.Reader, boundary string) 
 			default:
 				// Steal the current frame then inject another one. This permits to
 				// have the channel always with a fresh frame.
-				<-x
+				select {
+				case <-x:
+				default:
+				}
 				select {
 				case x <- pkt:
 				case <-done:
@@ -77,14 +78,17 @@ func (t *teeMimePart) listen(ctx context.Context, r io.Reader, boundary string) 
 }
 
 // relay relays data tee'd from the source.
-func (b *teeMimePart) relay(ctx context.Context) iter.Seq2[textproto.MIMEHeader, []byte] {
+func (b *teeMimePart) relay(ctx context.Context) <-chan mimePart {
 	ch := make(chan mimePart, 1)
 	b.mu.Lock()
 	b.listeners = append(b.listeners, ch)
 	last := b.last
 	b.mu.Unlock()
-	return func(yield func(textproto.MIMEHeader, []byte) bool) {
+	ch2 := make(chan mimePart, 2)
+	go func() {
 		defer func() {
+			close(ch)
+			close(ch2)
 			b.mu.Lock()
 			for i := range b.listeners {
 				if b.listeners[i] == ch {
@@ -95,21 +99,28 @@ func (b *teeMimePart) relay(ctx context.Context) iter.Seq2[textproto.MIMEHeader,
 			}
 			b.mu.Unlock()
 		}()
-		if ctx.Err() != nil || !yield(last.hdr, last.b) {
-			return
-		}
-		// Do not leak memory.
-		last.hdr = nil
-		last.b = nil
-		for {
+		done := ctx.Done()
+		if len(last.hdr) != 0 || len(last.b) != 0 {
 			select {
-			case <-ctx.Done():
+			case ch2 <- last:
+			case <-done:
 				return
-			case pkt := <-ch:
-				if !yield(pkt.hdr, pkt.b) {
-					return
-				}
 			}
 		}
-	}
+		// Do not leak memory.
+		last = mimePart{}
+		// The relay is necessary so the context can be used to cancel the
+		// listening.
+		// TODO: Store ctx in b.listeners' entry so listen() can do the
+		// cancelation, which would remove the need for the second channel.
+		for {
+			select {
+			case pkt := <-ch:
+				ch2 <- pkt
+			case <-done:
+				return
+			}
+		}
+	}()
+	return ch
 }

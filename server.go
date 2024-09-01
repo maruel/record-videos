@@ -47,6 +47,17 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		slog.Info("teeMimePart", "msg", "exit", "err", err2)
 	}()
 
+	go func() {
+		ctx2, cancel := context.WithCancel(ctx)
+		defer cancel()
+		ch := tm.relay(ctx)
+		select {
+		case pkt := <-ch:
+			slog.Info("ready", "bytes", len(pkt.b))
+		case <-ctx2.Done():
+		}
+	}()
+
 	// MJPEG stream
 	m.HandleFunc("GET /mjpeg", func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
@@ -55,22 +66,29 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		defer mw.Close()
 		h := w.Header()
 		h.Set("Content-Type", "multipart/x-mixed-replace;boundary="+mw.Boundary())
-		//h.Set("Content-Type", "multipart/x-mixed-replace;boundary=FRAME")
 		h.Set("Connection", "close")
 		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 		h.Set("Pragma", "no-cache")
 		h.Set("Expires", "0")
-		i := 0
-		for hdr, frame := range tm.relay(req.Context()) {
-			slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(frame))
-			fw, err := mw.CreatePart(hdr)
-			if err != nil {
-				break
+		w.WriteHeader(200)
+		ctx := req.Context()
+		ch := tm.relay(ctx)
+		done := ctx.Done()
+		for i := 0; ctx.Err() == nil; i++ {
+			select {
+			case p := <-ch:
+				slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(p.b))
+				fw, err := mw.CreatePart(p.hdr)
+				if err != nil {
+					slog.Error("http", "remote", req.RemoteAddr, "err", err)
+					break
+				}
+				if _, err := fw.Write(p.b); err != nil {
+					slog.Error("http", "remote", req.RemoteAddr, "err", err)
+					break
+				}
+			case <-done:
 			}
-			if _, err := fw.Write(frame); err != nil {
-				break
-			}
-			i++
 		}
 		slog.Info("http", "remote", req.RemoteAddr, "done", true, "d", time.Since(start).Round(100*time.Millisecond))
 	})
