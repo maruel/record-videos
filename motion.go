@@ -27,7 +27,7 @@ import (
 // motionOptions is the options for motion detection and recording.
 type motionOptions struct {
 	// yThreshold determines the motion sensitivity as per the Y (from YUV)
-	// average pixel brightness when two frames are substracted and then an edge
+	// average pixel brightness when two frames are subtracted and then an edge
 	// detection algorithm is ran over.
 	yThreshold float32
 	// motionExpiration is the duration after which a motion is timed out.
