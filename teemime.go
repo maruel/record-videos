@@ -61,6 +61,15 @@ func (t *teeMimePart) listen(ctx context.Context, r io.Reader, boundary string) 
 			case <-done:
 				return ctx.Err()
 			default:
+				// Steal the current frame then inject another one. This permits to
+				// have the channel always with a fresh frame.
+				<-x
+				select {
+				case x <- pkt:
+				case <-done:
+					return ctx.Err()
+				default:
+				}
 			}
 		}
 	}

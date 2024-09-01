@@ -42,22 +42,38 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 	if err != nil {
 		return err
 	}
-	defer metadataR.Close()
+	defer func() {
+		if err2 := metadataR.Close(); err2 != nil {
+			slog.Error("metadataR", "err", err2)
+		}
+	}()
 	mjpegR, mjpegW, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	defer mjpegR.Close()
-	defer mjpegW.Close()
+	defer func() {
+		if err2 := mjpegR.Close(); err2 != nil {
+			slog.Error("mjpegR", "err", err2)
+		}
+	}()
+	defer func() {
+		if err2 := mjpegW.Close(); err2 != nil {
+			slog.Error("mjpegW", "err", err2)
+		}
+	}()
 	args, err := buildFFMPEGCmd(fo)
 	if err != nil {
-		_ = metadataW.Close()
+		if err2 := metadataW.Close(); err2 != nil {
+			slog.Error("metadataW", "err", err2)
+		}
 		return err
 	}
 	eg, ctx := errgroup.WithContext(ctx)
 	if addr != "" {
 		if err = startServer(ctx, addr, mjpegR, root); err != nil {
-			_ = metadataW.Close()
+			if err2 := metadataW.Close(); err2 != nil {
+				slog.Error("metadataW", "err", err2)
+			}
 			return err
 		}
 	}
@@ -91,8 +107,11 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 		// TODO: Does this requires us to get rid of start?
 
 		// This is necessary because processMetadata doesn't accept a context.
-		defer metadataW.Close()
-
+		defer func() {
+			if err2 := metadataW.Close(); err2 != nil {
+				slog.Error("metadataW", "err", err2)
+			}
+		}()
 		//for ctx.Err() == nil {
 		// If any of the eg.Go() call above returns an error, this will kill ffmpeg
 		// via ctx.
@@ -156,7 +175,11 @@ func mainImpl() error {
 	if err != nil {
 		return err
 	}
-	defer wat.Close()
+	defer func() {
+		if err2 := wat.Close(); err2 != nil {
+			slog.Error("watcher", "err", err2)
+		}
+	}()
 	if err = wat.Add(e); err != nil {
 		return err
 	}
