@@ -295,16 +295,23 @@ loop:
 			if mo.webhook != "" {
 				d, _ := json.Marshal(map[string]bool{"motion": event.start})
 				slog.Info("webhook", "url", mo.webhook, "motion", event.start)
+				ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
 				// #nosec G107
-				resp, err := http.Post(mo.webhook, "application/json", bytes.NewReader(d))
-				if err != nil {
+				if req, err := http.NewRequestWithContext(ctx2, "POST", mo.webhook, bytes.NewReader(d)); err != nil {
 					slog.Error("webhook", "url", mo.webhook, "motion", event.start, "err", err)
 				} else {
-					_ = resp.Body.Close()
+					req.Header.Set("Content-Type", "application/json")
+					if resp, err := http.DefaultClient.Do(req); err != nil {
+						slog.Error("webhook", "url", mo.webhook, "motion", event.start, "err", err)
+					} else {
+						_ = resp.Body.Close()
+					}
 				}
+				cancel()
 			}
 		}
 	}
+	slog.Info("processMotion", "msg", "ending")
 	// We have to quit now.
 	for _, l := range toGen {
 		if err := generateMotionRecording(root, l[0], l[1], l[2]); err != nil {
