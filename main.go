@@ -67,14 +67,20 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 	events := make(chan motionEvent, 10)
 	eg.Go(func() error {
 		defer close(ch)
-		return processMetadata(start, metadataR, ch)
+		err2 := processMetadata(start, metadataR, ch)
+		slog.Info("processMetadata", "msg", "exit", "err", err2)
+		return err2
 	})
 	eg.Go(func() error {
 		defer close(events)
-		return filterMotion(ctx, mo, start, ch, events)
+		err2 := filterMotion(ctx, mo, start, ch, events)
+		slog.Info("filterMotion", "msg", "exit", "err", err2)
+		return err2
 	})
 	eg.Go(func() error {
-		return processMotion(ctx, mo, root, events)
+		err2 := processMotion(ctx, mo, root, events)
+		slog.Info("processMotion", "msg", "exit", "err", err2)
+		return err2
 	})
 	eg.Go(func() error {
 		// TODO: Transparently restart ffmpeg when network or USB goes down as long as
@@ -95,8 +101,8 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 			return err2
 		}
 		// ffmpeg always return an error, so ignore it.
-		_ = cmd.Wait()
-		slog.Info("ffmpeg", "msg", "exit")
+		err2 := cmd.Wait()
+		slog.Info("ffmpeg", "msg", "exit", "err", err2)
 		//}
 		return nil
 	})

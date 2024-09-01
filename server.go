@@ -124,7 +124,10 @@ func (b *broadcastFrames) relay(ctx context.Context) iter.Seq[[]byte] {
 func startServer(ctx context.Context, addr string, r io.Reader, root string) error {
 	m := http.ServeMux{}
 	bf := &broadcastFrames{}
-	go bf.listen(ctx, r)
+	go func() {
+		bf.listen(ctx, r)
+		slog.Info("broadcastFrames", "msg", "exit")
+	}()
 
 	// MJPEG stream
 	m.HandleFunc("GET /mjpeg", func(w http.ResponseWriter, req *http.Request) {
@@ -247,7 +250,10 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		return err
 	}
 	slog.Info("http", "addr", l.Addr())
-	go s.Serve(l)
+	go func() {
+		err2 := s.Serve(l)
+		slog.Info("http", "msg", "exit", "err", err2)
+	}()
 	// TODO: clean shutdown.
 	//s.Shutdown(context.Background())
 	return nil
