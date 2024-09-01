@@ -18,11 +18,16 @@ type mimePart struct {
 	b   []byte
 }
 
+type listener struct {
+	ctx context.Context
+	ch  chan mimePart
+}
+
 // teeMimePart duplicates mime multipart to multiple readers.
 type teeMimePart struct {
 	mu        sync.Mutex
 	last      mimePart
-	listeners []chan mimePart
+	listeners []*listener
 }
 
 // listen reads a mimepart stream, decodes it, then relay it to the current
@@ -50,25 +55,33 @@ func (t *teeMimePart) listen(ctx context.Context, r io.Reader, boundary string) 
 		pkt := mimePart{p.Header, b}
 		t.mu.Lock()
 		t.last = pkt
-		l := make([]chan mimePart, len(t.listeners))
+		l := make([]*listener, len(t.listeners))
 		copy(l, t.listeners)
 		t.mu.Unlock()
 		for _, x := range l {
 			select {
-			case x <- pkt:
+			case x.ch <- pkt:
 			case <-done:
 				return ctx.Err()
+			case <-x.ctx.Done():
+				return x.ctx.Err()
 			default:
 				// Steal the current frame then inject another one. This permits to
 				// have the channel always with a fresh frame.
 				select {
-				case <-x:
+				case <-x.ch:
+				case <-done:
+					return ctx.Err()
+				case <-x.ctx.Done():
+					return x.ctx.Err()
 				default:
 				}
 				select {
-				case x <- pkt:
+				case x.ch <- pkt:
 				case <-done:
 					return ctx.Err()
+				case <-x.ctx.Done():
+					return x.ctx.Err()
 				default:
 				}
 			}
@@ -79,48 +92,30 @@ func (t *teeMimePart) listen(ctx context.Context, r io.Reader, boundary string) 
 
 // relay relays data tee'd from the source.
 func (b *teeMimePart) relay(ctx context.Context) <-chan mimePart {
-	ch := make(chan mimePart, 1)
+	l := &listener{ctx, make(chan mimePart, 1)}
 	b.mu.Lock()
-	b.listeners = append(b.listeners, ch)
+	b.listeners = append(b.listeners, l)
 	last := b.last
 	b.mu.Unlock()
-	ch2 := make(chan mimePart, 2)
+	// Inject the last packet right away.
+	if len(last.hdr) != 0 && len(last.b) != 0 {
+		l.ch <- last
+	}
 	go func() {
 		defer func() {
-			close(ch)
-			close(ch2)
+			close(l.ch)
 			b.mu.Lock()
 			for i := range b.listeners {
-				if b.listeners[i] == ch {
+				if b.listeners[i] == l {
 					copy(b.listeners[i:], b.listeners[i+1:])
 					b.listeners = b.listeners[:len(b.listeners)-1]
 					break
 				}
 			}
 			b.mu.Unlock()
+
 		}()
-		done := ctx.Done()
-		if len(last.hdr) != 0 || len(last.b) != 0 {
-			select {
-			case ch2 <- last:
-			case <-done:
-				return
-			}
-		}
-		// Do not leak memory.
-		last = mimePart{}
-		// The relay is necessary so the context can be used to cancel the
-		// listening.
-		// TODO: Store ctx in b.listeners' entry so listen() can do the
-		// cancelation, which would remove the need for the second channel.
-		for {
-			select {
-			case pkt := <-ch:
-				ch2 <- pkt
-			case <-done:
-				return
-			}
-		}
+		<-ctx.Done()
 	}()
-	return ch
+	return l.ch
 }
