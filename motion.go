@@ -29,7 +29,7 @@ type motionOptions struct {
 	// yThreshold determines the motion sensitivity as per the Y (from YUV)
 	// average pixel brightness when two frames are substracted and then an edge
 	// detection algorithm is ran over.
-	yThreshold float64
+	yThreshold float32
 	// motionExpiration is the duration after which a motion is timed out.
 	motionExpiration time.Duration
 	// preCapture is the duration to record before the motion is detected.
@@ -59,7 +59,7 @@ type motionOptions struct {
 type yLevel struct {
 	frame int
 	t     time.Time
-	yavg  float64
+	yavg  float32
 }
 
 // motionEvent is a processed yLevel to determine when motion started and
@@ -85,12 +85,12 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 		l := b.Text()
 		//slog.Debug("metadata", "l", l)
 		if a, ok := strings.CutPrefix(l, "lavfi.signalstats.YAVG="); ok {
-			if yavg, err2 = strconv.ParseFloat(a, 64); err2 != nil {
+			if yavg, err2 = strconv.ParseFloat(a, 32); err2 != nil {
 				slog.Error("metadata", "err", err2)
 				return fmt.Errorf("unexpected metadata output: %q", l)
 			}
 			yavg = math.Round(yavg*100) * 0.01
-			ch <- yLevel{frame: frame, t: start.Add(ptsTime).Round(100 * time.Millisecond), yavg: yavg}
+			ch <- yLevel{frame: frame, t: start.Add(ptsTime).Round(100 * time.Millisecond), yavg: float32(yavg)}
 			continue
 		}
 		f := strings.Fields(l)
@@ -103,7 +103,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 			return fmt.Errorf("unexpected metadata output: %q", l)
 		}
 		v := 0.
-		if v, err2 = strconv.ParseFloat(f[2][len("pts_time:"):], 64); err2 != nil {
+		if v, err2 = strconv.ParseFloat(f[2][len("pts_time:"):], 32); err2 != nil {
 			slog.Error("metadata", "err", err2)
 			return fmt.Errorf("unexpected metadata output: %q", l)
 		}

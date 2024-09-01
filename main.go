@@ -231,7 +231,7 @@ func mainImpl() error {
 		verbose: *verbose,
 	}
 	mo := &motionOptions{
-		yThreshold:         *yavg,
+		yThreshold:         float32(*yavg),
 		motionExpiration:   5 * time.Second,
 		preCapture:         5 * time.Second,
 		postCapture:        2 * time.Second,
