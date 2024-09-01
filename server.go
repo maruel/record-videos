@@ -10,18 +10,14 @@ import (
 	"html/template"
 	"io"
 	"io/fs"
-	"iter"
 	"log/slog"
 	"mime/multipart"
 	"net"
 	"net/http"
-	"net/textproto"
 	"net/url"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -36,84 +32,6 @@ var (
 	dataTmpl = template.Must(template.New("").Parse("<script>'use strict';const data = {{.}};</script>"))
 )
 
-// broadcastFrames broadcast MPJPEG frames to listeners.
-type broadcastFrames struct {
-	mu        sync.Mutex
-	lastFrame []byte
-	listeners []chan []byte
-}
-
-// listen reads ffmpeg's mpjpeg mime stream, decodes it, then send it to
-// readers.
-func (b *broadcastFrames) listen(ctx context.Context, r io.Reader) {
-	mr := multipart.NewReader(r, "ffmpeg")
-	for i := 0; ctx.Err() == nil; i++ {
-		p, err := mr.NextPart()
-		if err == io.EOF {
-			return
-		}
-		if err != nil {
-			return
-		}
-		frame, err := io.ReadAll(p)
-		if err != nil {
-			return
-		}
-		// First frame read.
-		if i == 0 {
-			slog.Info("ready")
-		}
-		//slog.Debug("mjpeg", "i", i, "b", len(frame))
-		// Expected p.Header:
-		//	Content-type: image/jpeg
-		//	Content-length: 1234
-		b.mu.Lock()
-		b.lastFrame = frame
-		l := make([]chan []byte, len(b.listeners))
-		copy(l, b.listeners)
-		b.mu.Unlock()
-		for _, x := range l {
-			select {
-			case x <- frame:
-			default:
-			}
-		}
-	}
-}
-
-func (b *broadcastFrames) relay(ctx context.Context) iter.Seq[[]byte] {
-	ch := make(chan []byte, 1)
-	b.mu.Lock()
-	b.listeners = append(b.listeners, ch)
-	frame := b.lastFrame
-	b.mu.Unlock()
-	return func(yield func([]byte) bool) {
-		defer func() {
-			b.mu.Lock()
-			for i := range b.listeners {
-				if b.listeners[i] == ch {
-					copy(b.listeners[i:], b.listeners[i+1:])
-					b.listeners = b.listeners[:len(b.listeners)-1]
-					break
-				}
-			}
-			b.mu.Unlock()
-		}()
-		if ctx.Err() == nil && yield(frame) {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case frame := <-ch:
-					if !yield(frame) {
-						return
-					}
-				}
-			}
-		}
-	}
-}
-
 // startServer starts the web server.
 //
 // It serves:
@@ -123,10 +41,10 @@ func (b *broadcastFrames) relay(ctx context.Context) iter.Seq[[]byte] {
 // - /raw/ to serve individual .m3u8 and .ts files
 func startServer(ctx context.Context, addr string, r io.Reader, root string) error {
 	m := http.ServeMux{}
-	bf := &broadcastFrames{}
+	tm := &teeMimePart{}
 	go func() {
-		bf.listen(ctx, r)
-		slog.Info("broadcastFrames", "msg", "exit")
+		err2 := tm.listen(ctx, r, "ffmpeg")
+		slog.Info("teeMimePart", "msg", "exit", "err", err2)
 	}()
 
 	// MJPEG stream
@@ -143,12 +61,9 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		h.Set("Pragma", "no-cache")
 		h.Set("Expires", "0")
 		i := 0
-		for frame := range bf.relay(req.Context()) {
+		for hdr, frame := range tm.relay(req.Context()) {
 			slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(frame))
-			fw, err := mw.CreatePart(textproto.MIMEHeader{
-				"Content-Type":   []string{"image/jpeg"},
-				"Content-Length": []string{strconv.Itoa(len(frame))},
-			})
+			fw, err := mw.CreatePart(hdr)
 			if err != nil {
 				break
 			}
