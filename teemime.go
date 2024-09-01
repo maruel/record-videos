@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"iter"
 	"log/slog"
@@ -33,7 +34,7 @@ func (t *teeMimePart) listen(ctx context.Context, r io.Reader, boundary string) 
 	done := ctx.Done()
 	for i := 0; ctx.Err() == nil; i++ {
 		p, err := mr.NextPart()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			// We're done.
 			return nil
 		}
