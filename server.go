@@ -71,10 +71,10 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		h.Set("Pragma", "no-cache")
 		h.Set("Expires", "0")
 		w.WriteHeader(200)
-		ctx := req.Context()
-		ch := tm.relay(ctx)
-		done := ctx.Done()
-		for i := 0; ctx.Err() == nil; i++ {
+		ctx2 := req.Context()
+		ch := tm.relay(ctx2)
+		done := ctx2.Done()
+		for i := 0; ctx2.Err() == nil; i++ {
 			select {
 			case p := <-ch:
 				slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(p.b))
@@ -85,7 +85,6 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 				}
 				if _, err := fw.Write(p.b); err != nil {
 					slog.Error("http", "remote", req.RemoteAddr, "err", err)
-					break
 				}
 			case <-done:
 			}
