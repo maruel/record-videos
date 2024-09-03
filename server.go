@@ -74,7 +74,8 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		ctx2 := req.Context()
 		ch := tm.relay(ctx2)
 		done := ctx2.Done()
-		for i := 0; ctx2.Err() == nil; i++ {
+		i := 0
+		for ; ctx2.Err() == nil; i++ {
 			select {
 			case p := <-ch:
 				slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(p.b))
@@ -89,7 +90,7 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 			case <-done:
 			}
 		}
-		slog.Info("http", "remote", req.RemoteAddr, "done", true, "d", time.Since(start).Round(100*time.Millisecond))
+		slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond), "ctx1", ctx.Err(), "ctx2", ctx2.Err(), "num_img", i)
 	})
 
 	// Video serving.
