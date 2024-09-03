@@ -47,18 +47,18 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 			slog.Error("metadataR", "err", err2)
 		}
 	}()
-	mjpegR, mjpegW, err := os.Pipe()
+	mpjpegR, mpjpegW, err := os.Pipe()
 	if err != nil {
 		return err
 	}
 	defer func() {
-		if err2 := mjpegR.Close(); err2 != nil {
-			slog.Error("mjpegR", "err", err2)
+		if err2 := mpjpegR.Close(); err2 != nil {
+			slog.Error("mpjpegR", "err", err2)
 		}
 	}()
 	defer func() {
-		if err2 := mjpegW.Close(); err2 != nil {
-			slog.Error("mjpegW", "err", err2)
+		if err2 := mpjpegW.Close(); err2 != nil {
+			slog.Error("mpjpegW", "err", err2)
 		}
 	}()
 	args, err := buildFFMPEGCmd(fo)
@@ -70,7 +70,7 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 	}
 	eg, ctx := errgroup.WithContext(ctx)
 	if addr != "" {
-		if err = startServer(ctx, addr, mjpegR, root); err != nil {
+		if err = startServer(ctx, addr, mpjpegR, root); err != nil {
 			if err2 := metadataW.Close(); err2 != nil {
 				slog.Error("metadataW", "err", err2)
 			}
@@ -115,7 +115,7 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 		//for ctx.Err() == nil {
 		// If any of the eg.Go() call above returns an error, this will kill ffmpeg
 		// via ctx.
-		cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mjpegW})
+		cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mpjpegW})
 		if err2 := cmd.Start(); err2 != nil {
 			return err2
 		}
@@ -226,8 +226,8 @@ func mainImpl() error {
 		d:     *d,
 		s:     s,
 		codec: *codec,
-		// Enable mjpeg encoding only if the server is running.
-		mjpeg:   *addr != "",
+		// Enable mpjpeg encoding only if the server is running.
+		mpjpeg:  *addr != "",
 		verbose: *verbose,
 	}
 	mo := &motionOptions{

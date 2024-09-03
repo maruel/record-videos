@@ -35,7 +35,7 @@ var (
 // startServer starts the web server.
 //
 // It serves:
-// - /mjpeg to retransmit mime encoded mjpeg.
+// - /mpjpeg to retransmit mime multipart encoded jpeg.
 // - /videos HTML page that contains <video> tags for each .m3u8 file found.
 // - /list HTML page with a link to each .m3u8 file found.
 // - /raw/ to serve individual .m3u8 and .ts files
@@ -58,10 +58,10 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		}
 	}()
 
-	// MJPEG stream
-	m.HandleFunc("GET /mjpeg", func(w http.ResponseWriter, req *http.Request) {
+	// MultiPart JPEG stream
+	m.HandleFunc("GET /mpjpeg", func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
-		slog.Info("http", "remote", req.RemoteAddr)
+		slog.Info("http", "remote", req.RemoteAddr, "method", req.Method)
 		mw := multipart.NewWriter(w)
 		defer mw.Close()
 		h := w.Header()

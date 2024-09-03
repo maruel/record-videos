@@ -411,8 +411,8 @@ type ffmpegOptions struct {
 	s style
 	// codec is one of h264 or libx265. libx265 takes about twice the CPU usage.
 	codec string
-	// mjpeg determines is the MJPEG stream is enabled.
-	mjpeg bool
+	// mpjpeg determines is the MultiPart JPEG stream is enabled.
+	mpjpeg bool
 	// verbose increases ffmpeg's output.
 	verbose bool
 
@@ -424,7 +424,7 @@ type ffmpegOptions struct {
 // Outputs:
 // - HLS and all.m3u8 into the current working directory.
 // - YAVG metadata to the first pipe in ExtraFiles.
-// - Mime encoded MJPEG to the second pipe in ExtraFiles, if mjpeg is true.
+// - Mime encoded JPEG stream to the second pipe in ExtraFiles, if mpjpeg is true.
 func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 	args := []string{
 		"ffmpeg",
@@ -484,8 +484,8 @@ func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 	fg := constructFilterGraph(o.s, o.w, o.h)
 	hlsOut := "[out]"
 	// MJPEG stream (optional)
-	if o.mjpeg {
-		// Append the mjpeg specific filterGraph.
+	if o.mpjpeg {
+		// Append the mpjpeg specific filterGraph.
 		fg = append(fg,
 			stream{
 				sources: []string{"[out]"},
@@ -530,7 +530,7 @@ func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 	)
 
 	// MPJPEG stream
-	if o.mjpeg {
+	if o.mpjpeg {
 		// https://ffmpeg.org/ffmpeg-all.html#pipe
 		args = append(args,
 			"-map", "[outMPJPEG]",
