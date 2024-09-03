@@ -259,10 +259,12 @@ loop:
 			if len(toGen) != 0 {
 				retryGen = time.After(reprocess)
 			}
-		case <-done:
+		case err := <-done:
+			slog.Info("processMotion", "done", err)
 			break loop
 		case event, ok := <-ch:
 			if !ok {
+				slog.Info("processMotion", "msg", "chan closed")
 				break loop
 			}
 			slog.Info("motionEvent", "t", event.t.Format("2006-01-02T15:04:05.00"), "start", event.start)
@@ -303,8 +305,8 @@ loop:
 					req.Header.Set("Content-Type", "application/json")
 					if resp, err := http.DefaultClient.Do(req); err != nil {
 						slog.Error("webhook", "url", mo.webhook, "motion", event.start, "err", err)
-					} else {
-						_ = resp.Body.Close()
+					} else if err = resp.Body.Close(); err != nil {
+						slog.Error("webhook", "url", mo.webhook, "motion", event.start, "err", err)
 					}
 				}
 				cancel()
