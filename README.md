@@ -131,8 +131,9 @@ record-videos integrates with [Home Assistant](https://home-assistant.io/)!
 #### MJPEG camera
 
 Enable record-videos MJPEG stream output with `-addr :8081`, then connect with
-https://home-assistant.io/integrations/mpjpeg/ and specify
-`http://127.0.0.1:8081/mpjpeg` with the right IP address.
+https://home-assistant.io/integrations/mpjpeg/ and specify with the right IP address:
+- URL MJPEG: `http://127.0.0.1:8081/mpjpeg`
+- URL static image: `http://127.0.0.1:8081/jpeg`
 
 
 #### Motion detection

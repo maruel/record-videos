@@ -61,7 +61,7 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 	// MultiPart JPEG stream
 	m.HandleFunc("GET /mpjpeg", func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
-		slog.Info("http", "remote", req.RemoteAddr, "method", req.Method)
+		slog.Info("http", "remote", req.RemoteAddr, "method", req.Method, "path", req.URL.Path)
 		mw := multipart.NewWriter(w)
 		defer mw.Close()
 		h := w.Header()
@@ -91,6 +91,37 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 			}
 		}
 		slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond), "ctx1", ctx.Err(), "ctx2", ctx2.Err(), "num_img", i)
+	})
+	// Serve a single image.
+	m.HandleFunc("GET /jpeg", func(w http.ResponseWriter, req *http.Request) {
+		start := time.Now()
+		slog.Info("http", "remote", req.RemoteAddr, "method", req.Method, "path", req.URL.Path)
+		h := w.Header()
+		h.Set("Connection", "close")
+		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		h.Set("Pragma", "no-cache")
+		h.Set("Expires", "0")
+		ctx2 := req.Context()
+		ch := tm.relay(ctx2)
+		done := ctx2.Done()
+		select {
+		case p := <-ch:
+			slog.Debug("http", "remote", req.RemoteAddr, "b", len(p.b))
+			for k, v := range p.hdr {
+				if len(v) != 1 {
+					panic("internal error")
+				}
+				h.Set(k, v[0])
+			}
+			w.WriteHeader(200)
+			if _, err := w.Write(p.b); err != nil {
+				slog.Error("http", "remote", req.RemoteAddr, "err", err)
+			}
+			slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond))
+		case <-done:
+			w.WriteHeader(400)
+			slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond), "ctx1", ctx.Err(), "ctx2", ctx2.Err())
+		}
 	})
 
 	// Video serving.
