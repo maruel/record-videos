@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -413,8 +414,12 @@ type ffmpegOptions struct {
 	codec string
 	// mpjpeg determines is the MultiPart JPEG stream is enabled.
 	mpjpeg bool
-	// verbose increases ffmpeg's output.
-	verbose bool
+	// level determines ffmpeg's output.
+	//
+	// It is recommended to use "repeat+warning". Using "repeat+level+debug" can
+	// be useful as it prints out filtergraph information per frame. The amount
+	// of data generated is impractical in steady state.
+	level string
 
 	_ struct{}
 }
@@ -431,18 +436,11 @@ func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 		"-hide_banner",
 		// Disable stats output because it uses CR character, which corrupts logs.
 		"-nostats",
+		"-loglevel", o.level,
 		// Enable automatic hardware acceleration for encoding. This can fail in
 		// weird ways, like trying to load CUDA when there's no nvidia hardware
 		// present.
 		//"-hwaccel", "auto",
-	}
-	if o.verbose {
-		// If you still struggle, you can use debug to get filtergraph information
-		// per frame. The amount of data generated is impractical in steady state.
-		//	args = append(args, "-loglevel", "repeat+debug")
-		args = append(args, "-loglevel", "repeat+info")
-	} else {
-		args = append(args, "-loglevel", "repeat+warning")
 	}
 	if strings.HasPrefix(o.src, "tcp://") {
 		// This is hardcoding the raspivid use case. Create an issue if this is a
@@ -546,14 +544,14 @@ func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 }
 
 // cmdFFMPEG constructs the *exec.Cmd to run ffmpeg.
-func cmdFFMPEG(ctx context.Context, root string, args []string, handles []*os.File) *exec.Cmd {
+func cmdFFMPEG(ctx context.Context, root string, args []string, handles []*os.File, stderr io.Writer) *exec.Cmd {
 	slog.Debug("exec", "args", args)
 	// #nosec G204
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = root
 	// stdin is intentionally not connected.
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stderr = stderr
 	// We use pipes to transfer data (yavg metadata and mime mjeg) and not
 	// stdout. This is much smarter.
 	cmd.ExtraFiles = handles

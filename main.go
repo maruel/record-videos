@@ -13,6 +13,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -25,11 +26,20 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
+	slogmulti "github.com/samber/slog-multi"
 	"golang.org/x/sync/errgroup"
 )
 
+func trimFloat64(groups []string, attr slog.Attr) slog.Attr {
+	if attr.Value.Kind() == slog.KindFloat64 {
+		return slog.String(attr.Key, fmt.Sprintf("%0.2f", attr.Value.Float64()))
+		//return slog.Float64(attr.Key, math.Round(attr.Value.Float64()*10)*0.1)
+	}
+	return attr
+}
+
 // run is the main loop.
-func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOptions) error {
+func run(ctx context.Context, root, addr string, fo *ffmpegOptions, ffmpegLog io.Writer, mo *motionOptions) error {
 	// References:
 	// - https://ffmpeg.org/ffmpeg-all.html
 	// - https://ffmpeg.org/ffmpeg-codecs.html
@@ -115,7 +125,7 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 		//for ctx.Err() == nil {
 		// If any of the eg.Go() call above returns an error, this will kill ffmpeg
 		// via ctx.
-		cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mpjpegW})
+		cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mpjpegW}, ffmpegLog)
 		if err2 := cmd.Start(); err2 != nil {
 			return err2
 		}
@@ -131,12 +141,13 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, mo *motionOp
 func mainImpl() error {
 	var level slog.LevelVar
 	level.Set(slog.LevelInfo)
-	logger := slog.New(tint.NewHandler(colorable.NewColorable(os.Stderr), &tint.Options{
-		Level:      &level,
-		TimeFormat: time.TimeOnly,
-		NoColor:    !isatty.IsTerminal(os.Stderr.Fd()),
-	}))
-	slog.SetDefault(logger)
+	hldr := tint.NewHandler(colorable.NewColorable(os.Stderr), &tint.Options{
+		Level:       &level,
+		TimeFormat:  time.TimeOnly,
+		NoColor:     !isatty.IsTerminal(os.Stderr.Fd()),
+		ReplaceAttr: trimFloat64,
+	})
+	slog.SetDefault(slog.New(hldr))
 	src := flag.String("src", "", "source to use: either a local device or a remote port, see README.md for more information")
 	mask := flag.String("mask", "", "image mask to use; white means area to detect. Automatically resized to frame size")
 	w := flag.Int("w", 1280, "width")
@@ -153,13 +164,46 @@ func mainImpl() error {
 	onEventEnd := flag.String("on-event-end", "", "script to run on motion event start")
 	webhook := flag.String("webhook", "", "webhook to call on motion events")
 	verbose := flag.Bool("v", false, "enable verbosity")
+	l := flag.String("logdir", "", "directory to log files to; reduces output to stderr")
 	flag.Parse()
 
 	if flag.NArg() != 0 {
 		return errors.New("unexpected argument")
 	}
+	ffmpegLevel := "repeat+warning"
 	if *verbose {
 		level.Set(slog.LevelDebug)
+		ffmpegLevel = "repeat+info"
+	}
+	ffmpegLog := os.Stderr
+	if *l != "" {
+		l2, err := filepath.Abs(*l)
+		if err != nil {
+			return fmt.Errorf("-l: %w", err)
+		}
+		f, err := os.OpenFile(filepath.Join(l2, "recd.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		// Revert back log to warning.
+		level.Set(slog.LevelWarn)
+		hldr2 := tint.NewHandler(f, &tint.Options{
+			Level:       slog.LevelDebug,
+			TimeFormat:  time.TimeOnly,
+			NoColor:     true,
+			ReplaceAttr: trimFloat64,
+		})
+		slog.SetDefault(slog.New(slogmulti.Fanout(hldr, hldr2)))
+		ffmpegLog, err = os.OpenFile(filepath.Join(l2, "ffmpeg.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+		if err != nil {
+			return err
+		}
+		defer ffmpegLog.Close()
+		ffmpegLevel = "repeat+level+verbose"
+		if *verbose {
+			ffmpegLevel = "repeat+level+debug"
+		}
 	}
 
 	// Quit whenever SIGINT is received.
@@ -188,7 +232,7 @@ func mainImpl() error {
 		cancel()
 	}()
 
-	if *root, err = filepath.Abs(filepath.Clean(*root)); err != nil {
+	if *root, err = filepath.Abs(*root); err != nil {
 		return err
 	}
 	if fi, err := os.Stat(*root); err != nil {
@@ -227,8 +271,8 @@ func mainImpl() error {
 		s:     s,
 		codec: *codec,
 		// Enable mpjpeg encoding only if the server is running.
-		mpjpeg:  *addr != "",
-		verbose: *verbose,
+		mpjpeg: *addr != "",
+		level:  ffmpegLevel,
 	}
 	mo := &motionOptions{
 		yThreshold:         float32(*yavg),
@@ -241,7 +285,7 @@ func mainImpl() error {
 		onEventEnd:         *onEventEnd,
 		webhook:            *webhook,
 	}
-	return run(ctx, *root, *addr, fo, mo)
+	return run(ctx, *root, *addr, fo, ffmpegLog, mo)
 }
 
 func main() {
