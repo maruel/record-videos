@@ -472,8 +472,8 @@ func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 		// to see it. It looks like:
 		//	[video4linux2,v4l2 @ 0x63b48c816180] The driver changed the time per frame from 1/15 to 1/10
 		"-framerate", strconv.Itoa(o.fps),
+		"-i", o.src,
 	)
-	args = append(args, "-i", o.src)
 	if o.mask != "" {
 		args = append(args, "-i", o.mask)
 	} else {
