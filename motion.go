@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -42,6 +41,9 @@ type motionOptions struct {
 	ignoreFirstFrames int
 	// ignoreFirstMoments ignores motion detection when the stream starts.
 	ignoreFirstMoments time.Duration
+	// keepAlive is the maximum time to wait between metadata frames before
+	// treating the stream as dead. Defaults to 10s in production.
+	keepAlive time.Duration
 
 	// onEventStart is a script to run upon motion detection.
 	onEventStart string
@@ -75,6 +77,9 @@ type motionEvent struct {
 //
 //	frame:1336 pts:1336    pts_time:53.44
 //	lavfi.signalstats.YAVG=0.213281
+//
+// It takes no context; cancellation is delivered via EOF on r when the caller
+// closes the pipe write-end after ffmpeg exits.
 func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 	b := bufio.NewScanner(r)
 	frame := 0
@@ -143,11 +148,10 @@ func filterMotion(ctx context.Context, mo *motionOptions, start time.Time, ch <-
 			events <- motionEvent{t: t.Round(100 * time.Millisecond), start: false}
 			inMotion = false
 
-		case <-time.After(10 * time.Second):
+		case <-time.After(mo.keepAlive):
 			// It's dead jim. It can happen when the USB port hangs, or if the remote
-			// TCP died. It's easier to just quit, and have systemd restart the
-			// process.
-			return errors.New("no events for more than 10s")
+			// TCP died. Returning an error signals the caller to restart ffmpeg.
+			return fmt.Errorf("no events for more than %s", mo.keepAlive)
 		}
 	}
 }

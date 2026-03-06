@@ -5,6 +5,33 @@
 // record-videos records videos to a directory.
 //
 // Should be paired with serve-videos.
+//
+// # Architecture
+//
+//	signal / fsnotify
+//	      │
+//	      ▼
+//	mainImpl() ──► run()
+//	                │
+//	                ├─ startServer()        (HTTP, stays alive across restarts)
+//	                │    └─ teeMimePart     (fan-out of MJPEG frames)
+//	                │
+//	                ├─ processMotion()      (goroutine, stays alive)
+//	                │    └─ events chan
+//	                │
+//	                └─ restart loop
+//	                     └─ runFFMPEGOnce() (per ffmpeg instance)
+//	                          ├─ ffmpeg process
+//	                          ├─ processMetadata()  (pipe fd 3 → yLevel)
+//	                          ├─ filterMotion()     (yLevel → motionEvent)
+//	                          └─ tm.listen()        (pipe fd 4 → MJPEG fan-out)
+//
+// # Data flows
+//
+//	metadataR/W  (os.Pipe)  ffmpeg fd 3  →  processMetadata
+//	mpjpegR/W    (os.Pipe)  ffmpeg fd 4  →  teeMimePart.listen
+//	ch           chan yLevel              processMetadata → filterMotion
+//	events       chan motionEvent         filterMotion    → processMotion
 package main
 
 import (
@@ -38,102 +65,145 @@ func trimFloat64(groups []string, attr slog.Attr) slog.Attr {
 	return attr
 }
 
-// run is the main loop.
-func run(ctx context.Context, root, addr string, fo *ffmpegOptions, ffmpegLog io.Writer, mo *motionOptions) error {
-	// References:
-	// - https://ffmpeg.org/ffmpeg-all.html
-	// - https://ffmpeg.org/ffmpeg-codecs.html
-	// - https://ffmpeg.org/ffmpeg-formats.html
-	// - https://ffmpeg.org/ffmpeg-utils.html
-	// - https://trac.ffmpeg.org/wiki/Capture/Webcam
-	//   ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
-	// - https://trac.ffmpeg.org/wiki/Encode/H.264
+// runFFMPEGOnce starts one ffmpeg instance alongside processMetadata and
+// filterMotion. It returns when ffmpeg exits for any reason, including the
+// keep-alive timeout. The events channel is never closed by this function.
+//
+// Pipe ownership: after cmd.Start() the parent closes its write ends
+// (metadataW, mpjpegW). The child holds dups. When ffmpeg exits all write
+// ends are gone, so the read ends return EOF and unblock processMetadata and
+// teeMimePart.listen without any explicit signalling.
+func runFFMPEGOnce(ctx context.Context, root string, args []string, ffmpegLog io.Writer, mo *motionOptions, events chan<- motionEvent, tm *teeMimePart, mpjpeg bool) error {
 	metadataR, metadataW, err := os.Pipe()
 	if err != nil {
 		return err
 	}
-	defer func() {
-		if err2 := metadataR.Close(); err2 != nil {
-			slog.Error("metadataR", "err", err2)
-		}
-	}()
-	mpjpegR, mpjpegW, err := os.Pipe()
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err2 := mpjpegR.Close(); err2 != nil {
-			slog.Error("mpjpegR", "err", err2)
-		}
-	}()
-	defer func() {
-		if err2 := mpjpegW.Close(); err2 != nil {
-			slog.Error("mpjpegW", "err", err2)
-		}
-	}()
-	args, err := buildFFMPEGCmd(fo)
-	if err != nil {
-		if err2 := metadataW.Close(); err2 != nil {
-			slog.Error("metadataW", "err", err2)
-		}
-		return err
-	}
-	eg, ctx := errgroup.WithContext(ctx)
-	if addr != "" {
-		if err = startServer(ctx, addr, mpjpegR, root); err != nil {
-			if err2 := metadataW.Close(); err2 != nil {
-				slog.Error("metadataW", "err", err2)
-			}
+	handles := []*os.File{metadataW}
+	var mpjpegR, mpjpegW *os.File
+	if mpjpeg && tm != nil {
+		if mpjpegR, mpjpegW, err = os.Pipe(); err != nil {
+			_ = metadataR.Close()
+			_ = metadataW.Close()
 			return err
 		}
+		handles = append(handles, mpjpegW)
+	}
+
+	eg, ctx2 := errgroup.WithContext(ctx)
+	cmd := cmdFFMPEG(ctx2, root, args, handles, ffmpegLog)
+	if err = cmd.Start(); err != nil {
+		_ = metadataR.Close()
+		_ = metadataW.Close()
+		if mpjpegR != nil {
+			_ = mpjpegR.Close()
+			_ = mpjpegW.Close()
+		}
+		return err
+	}
+	// Close parent's write ends; the child process holds its own dups.
+	_ = metadataW.Close()
+	if mpjpegW != nil {
+		_ = mpjpegW.Close()
+	}
+
+	if mpjpegR != nil {
+		go func() {
+			defer func() { _ = mpjpegR.Close() }()
+			err2 := tm.listen(ctx, mpjpegR, "ffmpeg")
+			slog.Info("teeMimePart", "msg", "exit", "err", err2)
+		}()
 	}
 
 	start := time.Now().Round(10 * time.Millisecond)
 	ch := make(chan yLevel, 10)
-	events := make(chan motionEvent, 10)
 	eg.Go(func() error {
 		defer close(ch)
+		defer func() { _ = metadataR.Close() }()
 		err2 := processMetadata(start, metadataR, ch)
 		slog.Info("processMetadata", "msg", "exit", "err", err2)
 		return err2
 	})
 	eg.Go(func() error {
-		defer close(events)
-		err2 := filterMotion(ctx, mo, start, ch, events)
+		err2 := filterMotion(ctx2, mo, start, ch, events)
 		slog.Info("filterMotion", "msg", "exit", "err", err2)
 		return err2
+	})
+	eg.Go(func() error {
+		err2 := cmd.Wait()
+		slog.Info("ffmpeg", "msg", "exit", "err", err2)
+		return nil
+	})
+	return eg.Wait()
+}
+
+// run is the main loop.
+//
+// References:
+//   - https://ffmpeg.org/ffmpeg-all.html
+//   - https://ffmpeg.org/ffmpeg-codecs.html
+//   - https://ffmpeg.org/ffmpeg-formats.html
+//   - https://ffmpeg.org/ffmpeg-utils.html
+//   - https://trac.ffmpeg.org/wiki/Capture/Webcam
+//     ffmpeg -hide_banner -f v4l2 -list_formats all -i /dev/video3
+//   - https://trac.ffmpeg.org/wiki/Encode/H.264
+func run(ctx context.Context, root, addr string, fo *ffmpegOptions, ffmpegLog io.Writer, mo *motionOptions) error {
+	args, err := buildFFMPEGCmd(fo)
+	if err != nil {
+		return err
+	}
+	var tm *teeMimePart
+	if addr != "" {
+		tm = &teeMimePart{}
+		if err := startServer(ctx, addr, tm, root); err != nil {
+			return err
+		}
+	}
+
+	eg, ctx := errgroup.WithContext(ctx)
+	events := make(chan motionEvent, 10)
+	eg.Go(func() error {
+		// Restart loop: restarts ffmpeg on any exit (stream loss, hang detected
+		// by filterMotion keep-alive, buffer overrun, etc.).
+		// Backoff: 1 s → 2 s → … → 30 s max; resets after a run ≥ 30 s.
+		// Stops only when ctx is canceled (SIGINT or binary update via fsnotify).
+		// processMotion and the events channel outlive individual ffmpeg runs.
+		// TODO: all.m3u8 is overwritten on each restart; the new instance starts
+		// a fresh playlist. Consider appending across restarts.
+		defer close(events)
+		const maxBackoff = 30 * time.Second
+		const resetThreshold = 30 * time.Second
+		backoff := time.Duration(0)
+		for ctx.Err() == nil {
+			t0 := time.Now()
+			err2 := runFFMPEGOnce(ctx, root, args, ffmpegLog, mo, events, tm, fo.mpjpeg)
+			if ctx.Err() != nil {
+				return nil
+			}
+			if fo.d > 0 {
+				// Duration-limited run (testing); do not restart.
+				return err2
+			}
+			slog.Warn("ffmpeg", "err", err2, "restart", true)
+			if time.Since(t0) >= resetThreshold {
+				backoff = 0
+			}
+			if backoff == 0 {
+				backoff = time.Second
+			} else {
+				backoff = min(backoff*2, maxBackoff)
+			}
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+				return nil
+			}
+		}
+		return nil
 	})
 	eg.Go(func() error {
 		err2 := processMotion(ctx, mo, root, events)
 		slog.Info("processMotion", "msg", "exit", "err", err2)
 		return err2
-	})
-	eg.Go(func() error {
-		// TODO: Transparently restart ffmpeg when network or USB goes down as long as
-		// the context is not canceled.
-		// One challenge is when the TCP stream stops, it's the keep-alive that
-		// detects that ffmpeg needs to be restarted, so the processMetadata should
-		// be associated with the code here.
-		// TODO: Does this requires us to get rid of start?
-
-		// This is necessary because processMetadata doesn't accept a context.
-		defer func() {
-			if err2 := metadataW.Close(); err2 != nil {
-				slog.Error("metadataW", "err", err2)
-			}
-		}()
-		// for ctx.Err() == nil {
-		// If any of the eg.Go() call above returns an error, this will kill ffmpeg
-		// via ctx.
-		cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mpjpegW}, ffmpegLog)
-		if err2 := cmd.Start(); err2 != nil {
-			return err2
-		}
-		// ffmpeg always return an error, so ignore it.
-		err2 := cmd.Wait()
-		slog.Info("ffmpeg", "msg", "exit", "err", err2)
-		// }
-		return nil
 	})
 	return eg.Wait()
 }
@@ -291,6 +361,7 @@ func mainImpl() error {
 		postCapture:        2 * time.Second,
 		ignoreFirstFrames:  10,
 		ignoreFirstMoments: 5 * time.Second,
+		keepAlive:          10 * time.Second,
 		onEventStart:       *onEventStart,
 		onEventEnd:         *onEventEnd,
 		webhook:            *webhook,
