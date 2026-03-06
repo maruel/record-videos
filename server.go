@@ -8,7 +8,6 @@ import (
 	"context"
 	_ "embed"
 	"html/template"
-	"io"
 	"io/fs"
 	"log/slog"
 	"mime/multipart"
@@ -39,14 +38,11 @@ var (
 // - /videos HTML page that contains <video> tags for each .m3u8 file found.
 // - /list HTML page with a link to each .m3u8 file found.
 // - /raw/ to serve individual .m3u8 and .ts files.
-func startServer(ctx context.Context, addr string, r io.Reader, root string) error {
+//
+// tm is owned by the caller; startServer only reads from it. MJPEG frames are
+// fed into tm externally (by runFFMPEGOnce) and survive ffmpeg restarts.
+func startServer(ctx context.Context, addr string, tm *teeMimePart, root string) error {
 	m := http.ServeMux{}
-	tm := &teeMimePart{}
-	go func() {
-		err2 := tm.listen(ctx, r, "ffmpeg")
-		slog.Info("teeMimePart", "msg", "exit", "err", err2)
-	}()
-
 	go func() {
 		ctx2, cancel := context.WithCancel(ctx)
 		defer cancel()
