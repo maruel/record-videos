@@ -33,7 +33,7 @@ import (
 func trimFloat64(groups []string, attr slog.Attr) slog.Attr {
 	if attr.Value.Kind() == slog.KindFloat64 {
 		return slog.String(attr.Key, fmt.Sprintf("%0.2f", attr.Value.Float64()))
-		//return slog.Float64(attr.Key, math.Round(attr.Value.Float64()*10)*0.1)
+		// return slog.Float64(attr.Key, math.Round(attr.Value.Float64()*10)*0.1)
 	}
 	return attr
 }
@@ -122,7 +122,7 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, ffmpegLog io
 				slog.Error("metadataW", "err", err2)
 			}
 		}()
-		//for ctx.Err() == nil {
+		// for ctx.Err() == nil {
 		// If any of the eg.Go() call above returns an error, this will kill ffmpeg
 		// via ctx.
 		cmd := cmdFFMPEG(ctx, root, args, []*os.File{metadataW, mpjpegW}, ffmpegLog)
@@ -132,7 +132,7 @@ func run(ctx context.Context, root, addr string, fo *ffmpegOptions, ffmpegLog io
 		// ffmpeg always return an error, so ignore it.
 		err2 := cmd.Wait()
 		slog.Info("ffmpeg", "msg", "exit", "err", err2)
-		//}
+		// }
 		return nil
 	})
 	return eg.Wait()
@@ -159,7 +159,7 @@ func mainImpl() error {
 	codec := flag.String("codec", "h264", "codec to use; libx265 takes significantly more CPU")
 	yavg := flag.Float64("yavg", 1., "Y average sensitivity, higher value means lower sensitivity")
 	root := flag.String("root", ".", "root directory to store videos into")
-	addr := flag.String("addr", "", "optional address to listen to to serve MJPEG")
+	addr := flag.String("addr", "", "optional address to listen to serve MJPEG")
 	onEventStart := flag.String("on-event-start", "", "script to run on motion event start")
 	onEventEnd := flag.String("on-event-end", "", "script to run on motion event start")
 	webhook := flag.String("webhook", "", "webhook to call on motion events")
@@ -181,11 +181,16 @@ func mainImpl() error {
 		if err != nil {
 			return fmt.Errorf("-l: %w", err)
 		}
-		f, err := os.OpenFile(filepath.Join(l2, "recd.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+		// #nosec G302 G304
+		f, err := os.OpenFile(filepath.Join(l2, "recd.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		defer func() {
+			if err2 := f.Close(); err2 != nil {
+				slog.Error("f.Close", "err", err2)
+			}
+		}()
 		// Revert back log to warning.
 		level.Set(slog.LevelWarn)
 		hldr2 := tint.NewHandler(f, &tint.Options{
@@ -195,11 +200,16 @@ func mainImpl() error {
 			ReplaceAttr: trimFloat64,
 		})
 		slog.SetDefault(slog.New(slogmulti.Fanout(hldr, hldr2)))
-		ffmpegLog, err = os.OpenFile(filepath.Join(l2, "ffmpeg.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o666)
+		// #nosec G302 G304
+		ffmpegLog, err = os.OpenFile(filepath.Join(l2, "ffmpeg.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return err
 		}
-		defer ffmpegLog.Close()
+		defer func() {
+			if err2 := ffmpegLog.Close(); err2 != nil {
+				slog.Error("ffmpegLog.Close", "err", err2)
+			}
+		}()
 		ffmpegLevel = "repeat+level+verbose"
 		if *verbose {
 			ffmpegLevel = "repeat+level+debug"
@@ -224,7 +234,7 @@ func mainImpl() error {
 			slog.Error("watcher", "err", err2)
 		}
 	}()
-	if err = wat.Add(e); err != nil {
+	if err := wat.Add(e); err != nil {
 		return err
 	}
 	go func() {
@@ -257,7 +267,7 @@ func mainImpl() error {
 			c := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-f", "dshow", "-list_devices", "true", "-i", "")
 			out, _ = c.CombinedOutput()
 		default:
-			return fmt.Errorf("-src not specified")
+			return errors.New("-src not specified")
 		}
 		return fmt.Errorf("-src not specified, here's what has been found:\n\n%s", bytes.TrimSpace(out))
 	}
@@ -289,7 +299,7 @@ func mainImpl() error {
 }
 
 func main() {
-	if err := mainImpl(); err != nil && err != context.Canceled {
+	if err := mainImpl(); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintf(os.Stderr, "record-videos: %s\n", err.Error())
 		os.Exit(1)
 	}

@@ -38,7 +38,7 @@ var (
 // - /mpjpeg to retransmit mime multipart encoded jpeg.
 // - /videos HTML page that contains <video> tags for each .m3u8 file found.
 // - /list HTML page with a link to each .m3u8 file found.
-// - /raw/ to serve individual .m3u8 and .ts files
+// - /raw/ to serve individual .m3u8 and .ts files.
 func startServer(ctx context.Context, addr string, r io.Reader, root string) error {
 	m := http.ServeMux{}
 	tm := &teeMimePart{}
@@ -61,66 +61,70 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 	// MultiPart JPEG stream
 	m.HandleFunc("GET /mpjpeg", func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
-		slog.Info("http", "remote", req.RemoteAddr, "method", req.Method, "path", req.URL.Path)
+		slog.Info("http", "remote", req.RemoteAddr, "method", req.Method, "path", req.URL.Path) // #nosec G706
 		mw := multipart.NewWriter(w)
-		defer mw.Close()
+		defer func() {
+			if err2 := mw.Close(); err2 != nil {
+				slog.Error("mw.Close", "err", err2)
+			}
+		}()
 		h := w.Header()
 		h.Set("Content-Type", "multipart/x-mixed-replace;boundary="+mw.Boundary())
 		h.Set("Connection", "close")
 		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 		h.Set("Pragma", "no-cache")
 		h.Set("Expires", "0")
-		w.WriteHeader(200)
+		w.WriteHeader(http.StatusOK)
 		ctx2 := req.Context()
-		ch := tm.relay(ctx2)
+		ch := tm.relay(ctx2) //nolint:contextcheck // req.Context() is the correct request-scoped context
 		done := ctx2.Done()
 		i := 0
 		for ; ctx2.Err() == nil; i++ {
 			select {
 			case p := <-ch:
-				slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(p.b))
+				slog.Debug("http", "remote", req.RemoteAddr, "i", i, "b", len(p.b)) // #nosec G706
 				fw, err := mw.CreatePart(p.hdr)
 				if err != nil {
-					slog.Error("http", "remote", req.RemoteAddr, "err", err)
+					slog.Error("http", "remote", req.RemoteAddr, "err", err) // #nosec G706
 					break
 				}
 				if _, err := fw.Write(p.b); err != nil {
-					slog.Error("http", "remote", req.RemoteAddr, "err", err)
+					slog.Error("http", "remote", req.RemoteAddr, "err", err) // #nosec G706
 				}
 			case <-done:
 			}
 		}
-		slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond), "ctx1", ctx.Err(), "ctx2", ctx2.Err(), "num_img", i)
+		slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond), "ctx1", ctx.Err(), "ctx2", ctx2.Err(), "num_img", i) // #nosec G706
 	})
 	// Serve a single image.
 	m.HandleFunc("GET /jpeg", func(w http.ResponseWriter, req *http.Request) {
 		start := time.Now()
-		slog.Info("http", "remote", req.RemoteAddr, "method", req.Method, "path", req.URL.Path)
+		slog.Info("http", "remote", req.RemoteAddr, "method", req.Method, "path", req.URL.Path) // #nosec G706
 		h := w.Header()
 		h.Set("Connection", "close")
 		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
 		h.Set("Pragma", "no-cache")
 		h.Set("Expires", "0")
 		ctx2 := req.Context()
-		ch := tm.relay(ctx2)
+		ch := tm.relay(ctx2) //nolint:contextcheck // req.Context() is the correct request-scoped context
 		done := ctx2.Done()
 		select {
 		case p := <-ch:
-			slog.Debug("http", "remote", req.RemoteAddr, "b", len(p.b))
+			slog.Debug("http", "remote", req.RemoteAddr, "b", len(p.b)) // #nosec G706
 			for k, v := range p.hdr {
 				if len(v) != 1 {
 					panic("internal error")
 				}
 				h.Set(k, v[0])
 			}
-			w.WriteHeader(200)
+			w.WriteHeader(http.StatusOK)
 			if _, err := w.Write(p.b); err != nil {
-				slog.Error("http", "remote", req.RemoteAddr, "err", err)
+				slog.Error("http", "remote", req.RemoteAddr, "err", err) // #nosec G706
 			}
-			slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond))
+			slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond)) // #nosec G706
 		case <-done:
-			w.WriteHeader(400)
-			slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond), "ctx1", ctx.Err(), "ctx2", ctx2.Err())
+			w.WriteHeader(http.StatusBadRequest)
+			slog.Info("http", "remote", req.RemoteAddr, "d", time.Since(start).Round(100*time.Millisecond), "ctx1", ctx.Err(), "ctx2", ctx2.Err()) // #nosec G706
 		}
 	})
 
@@ -128,15 +132,15 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 	m.HandleFunc("GET /raw/", func(w http.ResponseWriter, req *http.Request) {
 		path, err2 := url.QueryUnescape(req.URL.Path)
 		if err2 != nil {
-			slog.Error("http", "path", req.URL.Path)
-			http.Error(w, "Invalid path", 404)
+			slog.Error("http", "path", req.URL.Path) // #nosec G706
+			http.Error(w, "Invalid path", http.StatusNotFound)
 			return
 		}
 		f := path[len("/raw/"):]
 		// Limit to not path, only .m3u8 and .ts.
 		if strings.Contains(f, "/") || strings.Contains(f, "\\") || strings.Contains(f, "..") || (!strings.HasSuffix(f, ".m3u8") && !strings.HasSuffix(f, ".ts")) {
-			slog.Error("http", "path", req.URL.Path)
-			http.Error(w, "Invalid path", 404)
+			slog.Error("http", "path", req.URL.Path) // #nosec G706
+			http.Error(w, "Invalid path", http.StatusNotFound)
 			return
 		}
 
@@ -199,7 +203,7 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 			http.Redirect(w, req, "videos", http.StatusFound)
 			return
 		}
-		slog.Error("http", "path", req.URL.Path)
+		slog.Error("http", "path", req.URL.Path) // #nosec G706
 		http.Error(w, "Not found", http.StatusNotFound)
 	})
 	s := http.Server{
@@ -219,6 +223,6 @@ func startServer(ctx context.Context, addr string, r io.Reader, root string) err
 		slog.Info("http", "msg", "exit", "err", err2)
 	}()
 	// TODO: clean shutdown.
-	//s.Shutdown(context.Background())
+	// s.Shutdown(context.Background())
 	return nil
 }

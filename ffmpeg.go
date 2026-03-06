@@ -33,14 +33,14 @@ func (f filter) String() string {
 type chain []filter
 
 func (c chain) String() string {
-	out := ""
+	var b strings.Builder
 	for i, f := range c {
 		if i != 0 {
-			out += ","
+			b.WriteString(",")
 		}
-		out += f.String()
+		b.WriteString(f.String())
 	}
-	return out
+	return b.String()
 }
 
 // buildChain builds a filter chain from various filters and preexisting
@@ -82,14 +82,14 @@ func (s *stream) String() string {
 type filterGraph []stream
 
 func (f filterGraph) String() string {
-	out := ""
+	var b strings.Builder
 	for i, g := range f {
 		if i != 0 {
-			out += ";"
+			b.WriteString(";")
 		}
-		out += g.String()
+		b.WriteString(g.String())
 	}
-	return out
+	return b.String()
 }
 
 // The rest is specific to this project.
@@ -151,18 +151,18 @@ var (
 type style string
 
 func (s *style) Set(v string) error {
-	options := ""
+	var b strings.Builder
 	for i, x := range validStyles {
 		if v == string(x) {
 			*s = x
 			return nil
 		}
 		if i != 0 {
-			options += ", "
+			b.WriteString(", ")
 		}
-		options += string(x)
+		b.WriteString(string(x))
 	}
-	return errors.New("invalid style. Supported values are: " + options)
+	return errors.New("invalid style. Supported values are: " + b.String())
 }
 
 func (s *style) String() string {
@@ -440,7 +440,7 @@ func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 		// Enable automatic hardware acceleration for encoding. This can fail in
 		// weird ways, like trying to load CUDA when there's no nvidia hardware
 		// present.
-		//"-hwaccel", "auto",
+		// "-hwaccel", "auto",
 	}
 	if strings.HasPrefix(o.src, "tcp://") {
 		// This is hardcoding the raspivid use case. Create an issue if this is a
@@ -534,11 +534,11 @@ func buildFFMPEGCmd(o *ffmpegOptions) ([]string, error) {
 			"-map", "[outMPJPEG]",
 			"-f", "mpjpeg",
 			"-q", "2",
-			//"-qscale:v", "2",
+			// "-qscale:v", "2",
 			"pipe:4",
 		)
 		// Sequence of images (don't forget to disable h264)
-		//args = append(args, "-", "2", "output_frames_%04d.jpg")
+		// args = append(args, "-", "2", "output_frames_%04d.jpg")
 	}
 	return args, nil
 }

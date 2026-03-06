@@ -113,7 +113,6 @@ func (b *teeMimePart) relay(ctx context.Context) <-chan mimePart {
 				}
 			}
 			b.mu.Unlock()
-
 		}()
 		<-ctx.Done()
 	}()

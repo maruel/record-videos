@@ -83,7 +83,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 	var err2 error
 	for b.Scan() {
 		l := b.Text()
-		//slog.Debug("metadata", "l", l)
+		// slog.Debug("metadata", "l", l)
 		if a, ok := strings.CutPrefix(l, "lavfi.signalstats.YAVG="); ok {
 			if yavg, err2 = strconv.ParseFloat(a, 32); err2 != nil {
 				slog.Error("metadata", "err", err2)
@@ -95,7 +95,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 		}
 		f := strings.Fields(l)
 		if len(f) != 3 || !strings.HasPrefix(f[0], "frame:") || !strings.HasPrefix(f[2], "pts_time:") {
-			slog.Error("metadata", "f", f)
+			slog.Error("metadata", "f", f) // #nosec G706
 			return fmt.Errorf("unexpected metadata output: %q", l)
 		}
 		if frame, err2 = strconv.Atoi(f[0][len("frame:"):]); err2 != nil {
@@ -211,7 +211,7 @@ func generateMotionRecording(root string, t, start, end time.Time) error {
 	// last days of full recording as .ts files and motion for Y last days as
 	// .mp4, where Y is significantly larger than X.
 	// TODO: Figure out the start and end times to know which .ts file to include.
-	//return cmdFFMPEG(ctx, root, []string{"ffmpeg", "-i", "foo.ts", "-v:c", "copy", "-movflags", "faststart", t.Format("2006-01-02T15-04-05") + ".mp4"}, nil).Run()
+	// return cmdFFMPEG(ctx, root, []string{"ffmpeg", "-i", "foo.ts", "-v:c", "copy", "-movflags", "faststart", t.Format("2006-01-02T15-04-05") + ".mp4"}, nil).Run()
 	// -copyts
 	// -enc_time_base <epoch>
 	// -timecode
@@ -299,11 +299,11 @@ loop:
 				slog.Info("webhook", "url", mo.webhook, "motion", event.start)
 				ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
 				// #nosec G107
-				if req, err := http.NewRequestWithContext(ctx2, "POST", mo.webhook, bytes.NewReader(d)); err != nil {
+				if req, err := http.NewRequestWithContext(ctx2, http.MethodPost, mo.webhook, bytes.NewReader(d)); err != nil {
 					slog.Error("webhook", "url", mo.webhook, "motion", event.start, "err", err)
 				} else {
 					req.Header.Set("Content-Type", "application/json")
-					if resp, err := http.DefaultClient.Do(req); err != nil {
+					if resp, err := http.DefaultClient.Do(req); err != nil { // #nosec G704
 						slog.Error("webhook", "url", mo.webhook, "motion", event.start, "err", err)
 					} else if err = resp.Body.Close(); err != nil {
 						slog.Error("webhook", "url", mo.webhook, "motion", event.start, "err", err)
