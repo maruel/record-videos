@@ -1,0 +1,36 @@
+#!/bin/bash
+# Copyright 2026 Marc-Antoine Ruel. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
+
+# Verifies the fully staged worktree before committing.
+
+set -euo pipefail
+
+script_dir="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly script_dir
+repo_root="$(CDPATH='' cd -- "$script_dir/../.." && pwd)"
+readonly repo_root
+
+cd -- "$repo_root"
+
+if ! git diff --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+	printf '%s\n' 'Stage or remove all changes before committing; checks read the worktree.' >&2
+	exit 1
+fi
+
+index_tree=$(git write-tree)
+readonly index_tree
+
+make verify
+make test
+
+if [[ "$(git write-tree)" != "$index_tree" ]]; then
+	printf '%s\n' 'The index changed during checks; retry the commit to verify the final tree.' >&2
+	exit 1
+fi
+
+if ! git diff --quiet || [[ -n "$(git ls-files --others --exclude-standard)" ]]; then
+	printf '%s\n' 'Checks modified the worktree; stage or remove those changes before committing.' >&2
+	exit 1
+fi

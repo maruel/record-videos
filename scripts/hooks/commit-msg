@@ -1,0 +1,85 @@
+#!/bin/bash
+# Copyright 2026 Marc-Antoine Ruel. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
+
+# Rejects malformed, overlong, or co-authored commit messages.
+
+set -euo pipefail
+
+print_commit_guidance() {
+	printf '%s\n' \
+		'Commit guidance for coding agents:' \
+		'  - Use a concise subject no longer than 120 characters.' \
+		'  - Separate an optional body from the subject with a blank line.' \
+		'  - When useful, explain the rationale and tradeoffs; do not restate the diff.' >&2
+}
+
+if (($# != 1)); then
+	printf '%s\n' 'Usage: commit-msg <message-file>' >&2
+	print_commit_guidance
+	exit 2
+fi
+
+message_file=$1
+readonly message_file
+
+if [[ ! -f "$message_file" ]]; then
+	printf 'Commit message file does not exist: %s\n' "$message_file" >&2
+	print_commit_guidance
+	exit 2
+fi
+
+# Commit the same prefix that is validated. This also removes the verbose diff
+# Git appends after its scissors marker, without treating ordinary # lines as
+# disposable comments. Only Git's default # prefix is supported.
+readonly cut_line='# ------------------------ >8 ------------------------'
+effective_message=$(mktemp "${message_file}.XXXXXX")
+readonly effective_message
+trap 'if [[ -f "$effective_message" ]]; then rm -- "$effective_message"; fi' EXIT
+awk -v cut="$cut_line" '$0 == cut { exit } { print }' "$message_file" >"$effective_message"
+
+if grep -Fq '\n' "$effective_message"; then
+	printf '%s\n' 'Commit messages must use actual line breaks, not literal \n sequences.' >&2
+	print_commit_guidance
+	exit 1
+fi
+
+if grep -Eiq '^co-authored-by: ' "$effective_message"; then
+	printf '%s\n' 'Commit messages must not contain Co-authored-by trailers.' >&2
+	print_commit_guidance
+	exit 1
+fi
+
+if ! awk '
+  !subject {
+    if (NF) subject = 1
+    next
+  }
+  !separator {
+    if (!NF) {
+      separator = 1
+      next
+    }
+    invalid_separator = 1
+    next
+  }
+  END { exit !subject || invalid_separator }
+' "$effective_message"; then
+	printf '%s\n' 'Commit messages need a subject and a blank line before any body.' >&2
+	print_commit_guidance
+	exit 1
+fi
+
+if ! awk '
+  NF && length($0) > 120 {
+    printf "Commit message line %d is %d characters; maximum is 120.\n", NR, length($0) > "/dev/stderr"
+    exit 1
+  }
+' "$effective_message"; then
+	print_commit_guidance
+	exit 1
+fi
+
+# Make truncation explicit even if Git was invoked with a different cleanup mode.
+mv -- "$effective_message" "$message_file"

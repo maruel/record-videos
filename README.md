@@ -189,13 +189,12 @@ entities:
 
 ## Development
 
-Use Go 1.27 or later. Lint and license tools are pinned in `go.mod`.
-
 ```bash
-make build   # Build into bin/.
-make test    # Run tests and benchmarks with race detection and coverage.
-make verify  # Check workflows, lint, vet, compilation, and license headers.
-make fix     # Apply lint and formatting fixes.
+make git-hooks  # Install hooks after cloning.
+make build      # Build.
+make test       # Run tests.
+make verify     # Run static checks.
+make fix        # Apply formatting and lint fixes.
 ```
 
-Tests do not require ffmpeg or a camera. Coverage is written to `coverage.txt`.
+Tests do not require ffmpeg or a camera.

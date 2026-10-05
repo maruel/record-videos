@@ -18,19 +18,12 @@ package doc comment at the top of `main.go` and the doc comments on
 
 ---
 
-## Building and testing
+## Development checks
 
-```bash
-make build
-make test
-make verify
-make fix  # Apply lint and formatting fixes.
-```
-
-Go tool versions are pinned in `go.mod`. `make test` runs the race detector,
-coverage, and benchmarks; `make verify` checks workflows, lint, vet, test
-compilation, license headers, and committed executables. Build output goes
-to `bin/` and coverage to `coverage.txt`.
+Run `make git-hooks` after cloning to install the versioned hooks in
+`scripts/hooks`. Their scripts own the commit and push checks; `Makefile`
+owns the build, verification, test, and autofix commands. See README.md for
+setup and usage.
 
 Tests do **not** require ffmpeg or a camera. `motion_test.go` covers
 `processMetadata` parsing and all `filterMotion` exit paths.
