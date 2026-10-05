@@ -1,22 +1,37 @@
+# Copyright 2026 Marc-Antoine Ruel. All rights reserved.
+# Use of this source code is governed under the Apache License, Version 2.0
+# that can be found in the LICENSE file.
+
+# Static analysis and formatting for production code and tests.
+
 version: "2"
 run:
   tests: true
 linters:
   enable:
+    - asasalint
+    - bidichk
     - bodyclose
     - contextcheck
     - copyloopvar
     - dupword
     - durationcheck
+    - errchkjson
     - errname
     - errorlint
     - exhaustive
+    - fatcontext
+    - gocheckcompilerdirectives
     - gocritic
-    - gosec
     - godot
+    - gosec
+    - loggercheck
     - misspell
+    - modernize
     - nilerr
+    - nilnesserr
     - nilnil
+    - noctx
     - nolintlint
     - perfsprint
     - prealloc
@@ -26,6 +41,8 @@ linters:
     - unparam
     - unused
     - usestdlibvars
+    - usetesting
+    - wastedassign
     - whitespace
   settings:
     exhaustive:
@@ -44,6 +61,10 @@ linters:
   exclusions:
     generated: lax
     rules:
+      # The /raw/ handler rejects separators, parent references, and non-video extensions.
+      - path: ^server\.go$
+        linters: [gosec]
+        text: "G703:"
       - path: (.+)\.go$
         text: should have a package comment
     paths:
@@ -54,6 +75,9 @@ formatters:
   enable:
     - gofmt
     - goimports
+  settings:
+    gofmt:
+      simplify: true
   exclusions:
     generated: lax
     paths:

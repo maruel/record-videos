@@ -6,121 +6,79 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
 
 func TestProcessMetadata(t *testing.T) {
+	start := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	t.Run("valid", func(t *testing.T) {
-		pr, pw := io.Pipe()
-		ch := make(chan yLevel, 10)
-		start := time.Now()
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- processMetadata(start, pr, ch)
-		}()
-
-		if _, err := fmt.Fprintln(pw, "frame:1336 pts:1336    pts_time:53.44"); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := fmt.Fprintln(pw, "lavfi.signalstats.YAVG=0.213281"); err != nil {
-			t.Fatal(err)
-		}
-		if err := pw.Close(); err != nil {
-			t.Fatal(err)
-		}
-
-		got := <-ch
-		if got.frame != 1336 {
-			t.Errorf("frame: got %d, want 1336", got.frame)
-		}
-		// 0.213281 rounds to 0.21
-		if got.yavg < 0.20 || got.yavg > 0.22 {
-			t.Errorf("yavg: got %f, want ~0.21", got.yavg)
-		}
-		expected := start.Add(53440 * time.Millisecond).Round(100 * time.Millisecond)
-		if !got.t.Equal(expected) {
-			t.Errorf("t: got %v, want %v", got.t, expected)
-		}
-		if err := <-errCh; err != nil {
-			t.Fatal(err)
+		for _, tc := range []struct {
+			name  string
+			input string
+			want  []yLevel
+		}{
+			{name: "eof"},
+			{
+				name:  "frame",
+				input: "frame:1336 pts:1336    pts_time:53.44\nlavfi.signalstats.YAVG=0.213281\n",
+				want:  []yLevel{{frame: 1336, t: start.Add(53400 * time.Millisecond), yavg: 0.21}},
+			},
+			{
+				name:  "multiple_frames",
+				input: "frame:1 pts:1 pts_time:1.00\nlavfi.signalstats.YAVG=0.100000\nframe:2 pts:2 pts_time:2.00\nlavfi.signalstats.YAVG=0.200000\n",
+				want:  []yLevel{{frame: 1, t: start.Add(time.Second), yavg: 0.1}, {frame: 2, t: start.Add(2 * time.Second), yavg: 0.2}},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ch := make(chan yLevel, 10)
+				if err := processMetadata(start, strings.NewReader(tc.input), ch); err != nil {
+					t.Fatal(err)
+				}
+				close(ch)
+				var got []yLevel
+				for l := range ch {
+					got = append(got, l)
+				}
+				if !slices.Equal(got, tc.want) {
+					t.Errorf("got %v, want %v", got, tc.want)
+				}
+			})
 		}
 	})
-
-	t.Run("multiple_frames", func(t *testing.T) {
-		pr, pw := io.Pipe()
-		ch := make(chan yLevel, 10)
-		start := time.Now()
-		errCh := make(chan error, 1)
-		go func() {
-			err := processMetadata(start, pr, ch)
-			close(ch)
-			errCh <- err
-		}()
-
-		for i := range 3 {
-			if _, err := fmt.Fprintf(pw, "frame:%d pts:%d    pts_time:%d.00\n", i+1, i+1, i+1); err != nil {
+	t.Run("error", func(t *testing.T) {
+		for _, tc := range []struct{ name, input string }{
+			{"invalid_line", "not valid metadata at all\n"},
+			{"invalid_frame", "frame:bad pts:1 pts_time:1.00\n"},
+			{"invalid_timestamp", "frame:1 pts:1 pts_time:bad\n"},
+			{"invalid_yavg", "frame:1 pts:1 pts_time:1.00\nlavfi.signalstats.YAVG=bad\n"},
+			{"oversized_line", strings.Repeat("x", 64*1024)},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				ch := make(chan yLevel, 10)
+				if err := processMetadata(start, strings.NewReader(tc.input), ch); err == nil {
+					t.Fatal("expected malformed metadata error")
+				}
+				if len(ch) != 0 {
+					t.Error("malformed metadata emitted a frame")
+				}
+			})
+		}
+		t.Run("read", func(t *testing.T) {
+			pr, pw := io.Pipe()
+			want := errors.New("metadata read failed")
+			if err := pw.CloseWithError(want); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := fmt.Fprintf(pw, "lavfi.signalstats.YAVG=%.6f\n", float64(i+1)*0.1); err != nil {
-				t.Fatal(err)
+			t.Cleanup(func() { _ = pr.Close() })
+			if err := processMetadata(start, pr, make(chan yLevel, 1)); !errors.Is(err, want) {
+				t.Errorf("got %v, want %v", err, want)
 			}
-		}
-		if err := pw.Close(); err != nil {
-			t.Fatal(err)
-		}
-
-		count := 0
-		for range ch {
-			count++
-		}
-		if count != 3 {
-			t.Errorf("got %d frames, want 3", count)
-		}
-		if err := <-errCh; err != nil {
-			t.Fatal(err)
-		}
-	})
-
-	t.Run("eof", func(t *testing.T) {
-		pr, pw := io.Pipe()
-		ch := make(chan yLevel, 10)
-		start := time.Now()
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- processMetadata(start, pr, ch)
-		}()
-
-		if err := pw.Close(); err != nil {
-			t.Fatal(err)
-		}
-		if err := <-errCh; err != nil {
-			t.Errorf("expected nil on EOF, got %v", err)
-		}
-	})
-
-	t.Run("invalid", func(t *testing.T) {
-		pr, pw := io.Pipe()
-		ch := make(chan yLevel, 10)
-		start := time.Now()
-		errCh := make(chan error, 1)
-		go func() {
-			errCh <- processMetadata(start, pr, ch)
-		}()
-
-		if _, err := fmt.Fprintln(pw, "not valid metadata at all"); err != nil {
-			t.Fatal(err)
-		}
-		if err := pw.Close(); err != nil {
-			t.Fatal(err)
-		}
-
-		if err := <-errCh; err == nil {
-			t.Fatal("expected error for invalid metadata, got nil")
-		}
+		})
 	})
 }
 
@@ -154,10 +112,7 @@ func TestFilterMotion(t *testing.T) {
 			keepAlive:        5 * time.Second,
 		}
 
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			cancel()
-		}()
+		cancel()
 
 		if err := filterMotion(ctx, mo, time.Now(), ch, events); err != nil {
 			t.Errorf("expected nil on context cancel, got %v", err)
@@ -173,10 +128,7 @@ func TestFilterMotion(t *testing.T) {
 			keepAlive:        5 * time.Second,
 		}
 
-		go func() {
-			time.Sleep(50 * time.Millisecond)
-			close(ch)
-		}()
+		close(ch)
 
 		if err := filterMotion(t.Context(), mo, time.Now(), ch, events); err != nil {
 			t.Errorf("expected nil on channel close, got %v", err)
@@ -205,7 +157,6 @@ func TestFilterMotion(t *testing.T) {
 		}
 
 		// Wait for motion expiration.
-		time.Sleep(300 * time.Millisecond)
 		if evt := <-events; evt.start {
 			t.Errorf("expected motion end event")
 		}

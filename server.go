@@ -126,30 +126,7 @@ func startServer(ctx context.Context, addr string, tm *teeMimePart, root string)
 
 	// Video serving.
 	m.HandleFunc("GET /raw/", func(w http.ResponseWriter, req *http.Request) {
-		path, err2 := url.QueryUnescape(req.URL.Path)
-		if err2 != nil {
-			slog.Error("http", "path", req.URL.Path) // #nosec G706
-			http.Error(w, "Invalid path", http.StatusNotFound)
-			return
-		}
-		f := path[len("/raw/"):]
-		// Limit to not path, only .m3u8 and .ts.
-		if strings.Contains(f, "/") || strings.Contains(f, "\\") || strings.Contains(f, "..") || (!strings.HasSuffix(f, ".m3u8") && !strings.HasSuffix(f, ".ts")) {
-			slog.Error("http", "path", req.URL.Path) // #nosec G706
-			http.Error(w, "Invalid path", http.StatusNotFound)
-			return
-		}
-
-		// Cache for a long time, the exception is m3u8 since it could be a live
-		// playlist.
-		if h := w.Header(); strings.HasSuffix(f, ".m3u8") {
-			h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-			h.Set("Pragma", "no-cache")
-			h.Set("Expires", "0")
-		} else {
-			h.Set("Cache-Control", "public, max-age=86400")
-		}
-		http.ServeFile(w, req, filepath.Join(root, f))
+		serveVideo(root, w, req)
 	})
 
 	// HTML
@@ -209,7 +186,8 @@ func startServer(ctx context.Context, addr string, tm *teeMimePart, root string)
 		WriteTimeout: 366 * 24 * time.Hour,
 		IdleTimeout:  10. * time.Second,
 	}
-	l, err := net.Listen("tcp", addr)
+	var lc net.ListenConfig
+	l, err := lc.Listen(ctx, "tcp", addr)
 	if err != nil {
 		return err
 	}
@@ -221,4 +199,32 @@ func startServer(ctx context.Context, addr string, tm *teeMimePart, root string)
 	// TODO: clean shutdown.
 	// s.Shutdown(context.Background())
 	return nil
+}
+
+// serveVideo serves a single HLS playlist or segment from root.
+func serveVideo(root string, w http.ResponseWriter, req *http.Request) {
+	path, err2 := url.QueryUnescape(req.URL.Path)
+	if err2 != nil {
+		slog.Error("http", "path", req.URL.Path) // #nosec G706
+		http.Error(w, "Invalid path", http.StatusNotFound)
+		return
+	}
+	f := path[len("/raw/"):]
+	// Limit to not path, only .m3u8 and .ts.
+	if strings.Contains(f, "/") || strings.Contains(f, "\\") || strings.Contains(f, "..") || (!strings.HasSuffix(f, ".m3u8") && !strings.HasSuffix(f, ".ts")) {
+		slog.Error("http", "path", req.URL.Path) // #nosec G706
+		http.Error(w, "Invalid path", http.StatusNotFound)
+		return
+	}
+
+	// Cache for a long time, the exception is m3u8 since it could be a live
+	// playlist.
+	if h := w.Header(); strings.HasSuffix(f, ".m3u8") {
+		h.Set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+		h.Set("Pragma", "no-cache")
+		h.Set("Expires", "0")
+	} else {
+		h.Set("Cache-Control", "public, max-age=86400")
+	}
+	http.ServeFile(w, req, filepath.Join(root, f))
 }

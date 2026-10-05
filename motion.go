@@ -84,7 +84,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 	b := bufio.NewScanner(r)
 	frame := 0
 	var ptsTime time.Duration
-	yavg := 0.
+	var yavg float64
 	var err2 error
 	for b.Scan() {
 		l := b.Text()
@@ -107,7 +107,7 @@ func processMetadata(start time.Time, r io.Reader, ch chan<- yLevel) error {
 			slog.Error("metadata", "err", err2)
 			return fmt.Errorf("unexpected metadata output: %q", l)
 		}
-		v := 0.
+		var v float64
 		if v, err2 = strconv.ParseFloat(f[2][len("pts_time:"):], 32); err2 != nil {
 			slog.Error("metadata", "err", err2)
 			return fmt.Errorf("unexpected metadata output: %q", l)
@@ -299,7 +299,10 @@ loop:
 				}
 			}
 			if mo.webhook != "" {
-				d, _ := json.Marshal(map[string]bool{"motion": event.start})
+				d, err := json.Marshal(map[string]bool{"motion": event.start})
+				if err != nil {
+					return err
+				}
 				slog.Info("webhook", "url", mo.webhook, "motion", event.start)
 				ctx2, cancel := context.WithTimeout(ctx, 10*time.Second)
 				// #nosec G107
